@@ -1,0 +1,35 @@
+{
+  "name": "menix-job-assistant",
+  "version": "0.1.0",
+  "description": "Menix AI Job Assistant desktop MVP",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.menix.jobassistant",
+    "productName": "Menix Job Assistant",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/menix.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    }
+  }
+}

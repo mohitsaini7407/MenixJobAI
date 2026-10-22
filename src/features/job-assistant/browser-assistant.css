@@ -1,0 +1,22 @@
+.browser-assistant-page{max-width:1180px;margin:0 auto}
+.browser-assistant-page .jobs-page-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px}
+.browser-assistant-page .jobs-page-heading h2{margin:5px 0;font-size:25px}
+.browser-mode-tag{border:1px solid #3b6658;border-radius:20px;padding:7px 12px;color:#82d6ac;font-size:10px;font-weight:750;letter-spacing:1.1px}
+.browser-assistant-grid{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:16px}
+.browser-assistant-card h3{font-size:15px;margin:0 0 13px}
+.browser-field{display:flex;flex-direction:column;gap:6px;margin:13px 0;color:#aab7ce;font-size:11px;font-weight:650}
+.browser-field .search-input{font-size:13px}
+.browser-session-info{display:flex;gap:11px;align-items:flex-start;border-top:1px solid var(--line);margin-top:20px;padding-top:16px}
+.browser-status-dot{width:9px;height:9px;flex:0 0 9px;margin-top:5px;border-radius:50%;background:var(--yellow)}
+.browser-status-dot.is-active{background:#36c98b;box-shadow:0 0 0 4px #36c98b22}
+.browser-session-info strong,.browser-session-info small{display:block}
+.browser-session-info strong{font-size:12px}
+.browser-session-info small{color:var(--muted);font-size:11px;margin-top:3px}
+.browser-close-session{margin-top:10px;padding:5px 0}
+.browser-close-session:disabled{opacity:.45;cursor:default}
+.browser-save-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.browser-notes{min-height:105px;resize:vertical}
+.browser-saved-job{display:flex;flex-direction:column;gap:4px;margin-top:15px;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:12px}
+.browser-saved-job span{color:var(--muted);font-size:11px}
+@media(max-width:900px){.browser-assistant-grid{grid-template-columns:1fr}}
+@media(max-width:560px){.browser-assistant-page .jobs-page-heading{align-items:flex-start;flex-direction:column}.browser-save-grid{grid-template-columns:1fr}}
