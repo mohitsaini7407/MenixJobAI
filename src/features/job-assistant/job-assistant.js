@@ -1,7 +1,7 @@
 const API_BASE = 'http://localhost:8080/api';
 const GET_CACHE_TTL_MS = 60000;
 const getCache = new Map();
-const state = { page: 'dashboard', jobs: [], applications: [], outreach: [], portalCapabilities: [], profile: null, sources: [], stats: {}, aiStatus: { enabled: false }, selectedJob: null, detailReturnPage: null, query: '', location: '', careerStage: localStorage.getItem('menix-career-stage') || 'fresher', freshness: localStorage.getItem('menix-freshness') || '24h', minScore: Number(localStorage.getItem('menix-min-score') || 80), jobMinScore: Number(localStorage.getItem('menix-job-min-score') || 0), sort: 'match', applicationTabs: [], activeApplicationTab: null, outreachTab: 'drafts', activeOutreachId: null, browserAssistant: { portal: 'Naukri', status: 'Not Started', hostname: '', savedJobId: null, sessionConsent: false }, automaticSyncStarted: false };
+const state = { page: 'dashboard', jobs: [], applications: [], outreach: [], portalCapabilities: [], profile: null, sources: [], stats: {}, aiStatus: { enabled: false }, selectedJob: null, detailReturnPage: null, query: '', location: '', careerStage: localStorage.getItem('menix-career-stage') || 'fresher', freshness: localStorage.getItem('menix-freshness') || '24h', minScore: Number(localStorage.getItem('menix-min-score') || 80), jobMinScore: Number(localStorage.getItem('menix-job-min-score') || 0), sort: 'match', applicationTabs: [], activeApplicationTab: null, outreachTab: 'drafts', activeOutreachId: null, browserAssistant: { portal: 'Naukri', status: 'Not Started', hostname: '', url: '', keyword: '', location: '', experience: 'Fresher / Entry level', workMode: 'Remote', otherUrl: '', savedJobId: null, selectedTab: 'details', match: null, sessionConsent: false }, automaticSyncStarted: false };
 const content = document.getElementById('content');
 const accountAvatarStorageKey = 'menix-account-avatar';
 
@@ -10,19 +10,6 @@ if (window.menixDesktop) {
   document.getElementById('window-close')?.addEventListener('click', () => window.menixDesktop.closeWindow());
   document.getElementById('window-minimize')?.addEventListener('click', () => window.menixDesktop.minimizeWindow());
   document.getElementById('window-maximize')?.addEventListener('click', () => window.menixDesktop.toggleMaximizeWindow());
-  window.menixDesktop.onApplicationWindowClosed?.(() => {
-    if(['Not Started','Closed'].includes(state.browserAssistant.status))return;
-    state.browserAssistant.status='Closed';
-    state.browserAssistant.hostname='';
-    if(state.page!=='browser')return;
-    const status=document.getElementById('browser-session-status');
-    const host=document.getElementById('browser-session-host');
-    const close=document.getElementById('browser-close-session');
-    if(status)status.textContent='Closed';
-    if(host)host.textContent='Browser window closed. Your portal sign-in may remain saved; sign out on the portal to end it.';
-    if(close)close.disabled=true;
-    document.querySelector('.browser-status-dot')?.classList.remove('is-active');
-  });
 }
 
 async function api(path, options = {}) {
@@ -137,6 +124,7 @@ function go(page) {
 }
 function updateNavigation(page){
   document.body.classList.toggle('dashboard-page',page==='dashboard');
+  document.body.classList.toggle('browser-assistant-active',page==='browser');
   const activePage=page==='job-detail'?state.detailReturnPage:page;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === activePage));
 }
@@ -168,120 +156,259 @@ async function render() {
 
 function renderBrowserAssistant() {
  const profile=state.profile||{};
- const keyword=state.browserAssistant.keyword||state.query||String(profile.preferredTitles||'Software Engineer').split(/[,;\n]/)[0];
- const location=state.browserAssistant.location||String(profile.preferredLocations||'Remote worldwide').split(/[,;\n]/)[0];
- const savedJob=state.browserAssistant.savedJobId?state.jobs.find(job=>Number(job.id)===Number(state.browserAssistant.savedJobId)):null;
+ const keyword=state.browserAssistant.keyword||state.query||'Full Stack Developer';
+ const location=state.browserAssistant.location||state.location||String(profile.preferredLocations||'Remote').split(/[,;\n]/)[0];
+ const portals=[['Naukri','Naukri.com'],['LinkedIn','LinkedIn'],['Indeed','Indeed'],['Glassdoor','Glassdoor'],['Other Site','Other Site']];
  content.innerHTML=`<section class="browser-assistant-page">
-  <div class="jobs-page-heading"><div><span class="eyebrow">MANUAL PORTAL SEARCH</span><h2>Browser Assistant</h2><p class="muted small">Search on the original job site. Menix does not scrape listings, bypass sign-in, or submit applications.</p></div><span class="browser-mode-tag">MANUAL MODE</span></div>
-  <div class="browser-assistant-grid">
-   <section class="card browser-assistant-card"><h3>Search on a job portal</h3><p class="muted small">The isolated portal window uses a saved browser profile. Sign-in cookies may remain between app launches; sign out on the portal to end a saved login.</p><label class="browser-field">Portal<select id="browser-portal" class="search-input"><option>Naukri</option><option>LinkedIn</option><option>Indeed</option><option>Google Jobs</option><option>Company careers</option></select></label>
-    <label class="browser-field">Job title or keywords<input id="browser-keyword" class="search-input" value="${esc(keyword)}" placeholder="Full stack developer, Java, SQL"></label>
-    <label class="browser-field">Location<input id="browser-location" class="search-input" value="${esc(location)}" placeholder="Remote worldwide, India"></label>
-    <div class="actions"><button class="button" id="browser-open-website">Open Website</button><button class="button button-primary" id="browser-start-search">Start Search</button></div>
-    <div class="browser-session-info"><span class="browser-status-dot ${state.browserAssistant.status==='User Browsing'?'is-active':''}"></span><div><strong id="browser-session-status">${esc(state.browserAssistant.status)}</strong><small id="browser-session-host">${state.browserAssistant.hostname?`Website: ${esc(state.browserAssistant.hostname)}`:'No website open yet. Sign in and search manually on the portal.'}</small></div></div>
-    <button class="text-button browser-close-session" id="browser-close-session" ${state.browserAssistant.status==='Not Started'||state.browserAssistant.status==='Closed'?'disabled':''}>Close browser window</button>
-   </section>
-   <section class="card browser-assistant-card browser-save-card"><h3>Save a job you selected</h3><p class="muted small">Copy the original listing details from the portal and enter them here. Only information you provide is saved.</p>
-    <form id="browser-save-job"><label class="browser-field">Original job URL<input id="browser-job-url" name="url" type="url" class="search-input" placeholder="https://..." required></label>
-     <div class="browser-save-grid"><label class="browser-field">Job title<input name="title" class="search-input" placeholder="Job title" required></label><label class="browser-field">Company<input name="company" class="search-input" placeholder="Company name"></label></div>
-     <div class="browser-save-grid"><label class="browser-field">Location<input name="location" class="search-input" placeholder="Remote / city"></label><label class="browser-field">Work arrangement<input name="workMode" class="search-input" placeholder="Remote / hybrid / on-site"></label></div>
-     <label class="browser-field">Required skills<input name="requiredSkills" class="search-input" placeholder="Java, SQL, PostgreSQL"></label>
-     <label class="browser-field">Verified notes or job description<textarea name="description" class="search-input browser-notes" placeholder="Paste details you reviewed on the job site"></textarea></label>
-     <div class="actions"><button class="button button-primary" id="browser-save-button">Save selected job</button>${savedJob?`<button class="button" type="button" id="browser-prepare-application">Prepare application</button>`:''}</div>
-    </form>
-    ${savedJob?`<div class="browser-saved-job"><strong>Saved: ${esc(savedJob.title)}</strong><span>${esc(savedJob.company||'Company not specified')} · ${esc(savedJob.location||'Location not specified')}</span></div>`:''}
-   </section>
+  <header class="browser-page-heading"><div><h2>Browser Assistant</h2><p>Search and apply on official job websites with AI assistance. You stay in control.</p></div><div class="browser-supervision"><span class="browser-supervision-check">✓</span><div><strong>Supervised Mode</strong><small>Menix will not submit any application without your explicit approval.</small></div><button class="browser-learn-more" id="browser-learn-more">Learn more</button></div></header>
+  <div class="browser-portal-row">${portals.map(([value,label])=>`<button type="button" class="browser-portal-button ${state.browserAssistant.portal===value?'active':''}" data-browser-portal="${esc(value)}"><span class="browser-portal-mark mark-${value.toLowerCase().replaceAll(' ','-')}">${value==='Naukri'?'◉':value==='LinkedIn'?'in':value==='Indeed'?'i':value==='Glassdoor'?'G':'↗'}</span>${esc(label)}</button>`).join('')}</div>
+  <div class="browser-search-row">
+   <label class="browser-control browser-title-control"><span>Job Title / Keywords</span><input id="browser-keyword" value="${esc(keyword)}" placeholder="Full Stack Developer"></label>
+   <label class="browser-control browser-location-control"><span>Location</span><input id="browser-location" value="${esc(location)}" placeholder="Remote"></label>
+   <label class="browser-control browser-experience-control"><span>Experience</span><select id="browser-experience"><option>Fresher / Entry level</option><option>Internship</option><option>1-3 Years</option><option>3-5 Years</option><option>Any experience</option></select></label>
+   <label class="browser-control browser-work-control"><span>Work Mode</span><select id="browser-work-mode"><option>Remote</option><option>Hybrid</option><option>On-site</option><option>Any</option></select></label>
+   <button type="button" class="browser-open-button" id="browser-start-search">Open ${esc(state.browserAssistant.portal==='Other Site'?'Website':portals.find(p=>p[0]===state.browserAssistant.portal)?.[1]||'Website')} <span aria-hidden="true">↗</span></button>
   </div>
-  <p class="footer-note">Use the portal's own filters for experience, location, and work arrangement. Login, CAPTCHA, OTP, application answers, and final submission remain under your control.</p>
+  ${state.browserAssistant.portal==='Other Site'?`<label class="browser-other-site">Other site HTTPS address<input id="browser-other-url" type="url" placeholder="https://careers.example.com" value="${esc(state.browserAssistant.otherUrl)}"></label>`:''}
+  <div class="browser-workspace">
+   <section class="browser-window" aria-label="Job portal browser">
+    <div class="browser-chrome-tab"><span class="browser-chrome-icon">${state.browserAssistant.portal==='Naukri'?'◉':'↗'}</span><span id="browser-current-tab">${esc(state.browserAssistant.hostname||portals.find(p=>p[0]===state.browserAssistant.portal)?.[1]||'Other Site')}</span><button type="button" id="browser-close-session" aria-label="Close browser tab">×</button><button type="button" id="browser-new-tab" aria-label="Open portal">+</button><span class="browser-chrome-spacer"></span><button type="button" id="browser-remove-view" aria-label="Close browser panel">×</button></div>
+    <form class="browser-address-bar" id="browser-address-form"><button type="button" id="browser-back" aria-label="Back">‹</button><button type="button" id="browser-forward" aria-label="Forward">›</button><button type="button" id="browser-reload" aria-label="Reload">⟳</button><span class="browser-lock" aria-hidden="true">▣</span><input id="browser-address" aria-label="Website address" placeholder="Search the job portal manually"><button type="submit" aria-label="Open address">↵</button></form>
+    <div class="browser-view-wrap" id="browser-view-wrap"><div class="browser-empty-state"><div class="browser-empty-icon">◎</div><strong>Ready to search</strong><span>Choose a portal and open its official website. Search and sign in there as you normally would.</span><button type="button" class="browser-open-empty" id="browser-empty-open">Open ${esc(state.browserAssistant.portal==='Other Site'?'website':portals.find(p=>p[0]===state.browserAssistant.portal)?.[1]||'website')}</button></div></div>
+    <div class="browser-status-line"><span class="browser-status-dot ${state.browserAssistant.status==='User Browsing'?'is-active':''}" id="browser-status-dot"></span><span id="browser-session-status">${esc(state.browserAssistant.status==='Not Started'?'Ready for Search':state.browserAssistant.status)}</span><span id="browser-session-host">${state.browserAssistant.hostname?esc(state.browserAssistant.hostname):'Manual mode'}</span><button type="button" id="browser-open-external">Open in Browser ↗</button></div>
+   </section>
+   <aside class="browser-job-panel" aria-label="Selected job details">
+    <nav class="browser-detail-tabs" aria-label="Job assistant tabs"><button type="button" data-browser-tab="details" class="active">Job Details</button><button type="button" data-browser-tab="ai">AI Assistant</button><button type="button" data-browser-tab="prepare">Prepare Application</button><button type="button" data-browser-tab="review">Review &amp; Submit</button></nav>
+    <div id="browser-detail-content" class="browser-detail-content"></div>
+   </aside>
+  </div>
  </section>`;
- const portal=document.getElementById('browser-portal');
- portal.value=state.browserAssistant.portal;
+ document.getElementById('browser-experience').value=state.browserAssistant.experience;
+ document.getElementById('browser-work-mode').value=state.browserAssistant.workMode;
  document.getElementById('browser-keyword').addEventListener('input',event=>{state.browserAssistant.keyword=event.target.value;});
  document.getElementById('browser-location').addEventListener('input',event=>{state.browserAssistant.location=event.target.value;});
- portal.addEventListener('change',event=>{state.browserAssistant.portal=event.target.value;});
- document.getElementById('browser-open-website').addEventListener('click',()=>openBrowserAssistant(false).catch(error=>toast(`Could not open portal: ${error.message}`)));
- document.getElementById('browser-start-search').addEventListener('click',()=>openBrowserAssistant(true).catch(error=>toast(`Could not start portal search: ${error.message}`)));
- document.getElementById('browser-close-session').addEventListener('click',()=>closeBrowserAssistant().catch(error=>toast(`Could not close browser session: ${error.message}`)));
- document.getElementById('browser-save-job').addEventListener('submit',saveBrowserAssistantJob);
- document.getElementById('browser-prepare-application')?.addEventListener('click',()=>applyToJob(Number(savedJob.id)));
+ document.getElementById('browser-experience').addEventListener('change',event=>{state.browserAssistant.experience=event.target.value;});
+ document.getElementById('browser-work-mode').addEventListener('change',event=>{state.browserAssistant.workMode=event.target.value;});
+ document.querySelectorAll('[data-browser-portal]').forEach(button=>button.addEventListener('click',()=>{state.browserAssistant.portal=button.dataset.browserPortal;state.browserAssistant.url='';state.browserAssistant.hostname='';state.browserAssistant.status='Not Started';renderBrowserAssistant();}));
+ document.querySelectorAll('[data-browser-tab]').forEach(button=>button.addEventListener('click',()=>{state.browserAssistant.selectedTab=button.dataset.browserTab;renderBrowserDetails();}));
+ document.getElementById('browser-other-url')?.addEventListener('input',event=>{state.browserAssistant.otherUrl=event.target.value;});
+ document.getElementById('browser-start-search').addEventListener('click',()=>openBrowserAssistant(true).catch(error=>toast(`Could not open portal: ${error.message}`)));
+ document.getElementById('browser-empty-open').addEventListener('click',()=>openBrowserAssistant(false).catch(error=>toast(`Could not open portal: ${error.message}`)));
+ document.getElementById('browser-new-tab').addEventListener('click',()=>openBrowserAssistant(false).catch(error=>toast(`Could not open portal: ${error.message}`)));
+ document.getElementById('browser-close-session').addEventListener('click',closeEmbeddedBrowser);
+ document.getElementById('browser-remove-view').addEventListener('click',closeEmbeddedBrowser);
+ document.getElementById('browser-address-form').addEventListener('submit',navigateEmbeddedBrowser);
+ document.getElementById('browser-back').addEventListener('click',()=>embeddedBrowserView()?.canGoBack()&&embeddedBrowserView().goBack());
+ document.getElementById('browser-forward').addEventListener('click',()=>embeddedBrowserView()?.canGoForward()&&embeddedBrowserView().goForward());
+ document.getElementById('browser-reload').addEventListener('click',()=>embeddedBrowserView()?.reload());
+ document.getElementById('browser-open-external').addEventListener('click',()=>openCurrentBrowserInWindow().catch(error=>toast(error.message)));
+ document.getElementById('browser-learn-more').addEventListener('click',()=>toast('Menix helps organize and prepare applications. You review every answer and submit on the employer website yourself.'));
+ renderBrowserDetails();
+ if(state.browserAssistant.sessionConsent&&(state.browserAssistant.portal!=='Other Site'||state.browserAssistant.otherUrl))mountEmbeddedBrowser();
 }
 
 function getBrowserAssistantUrl(search) {
- const roots={Naukri:'https://www.naukri.com/',LinkedIn:'https://www.linkedin.com/jobs/',Indeed:'https://www.indeed.com/', 'Google Jobs':'https://www.google.com/search?ibp=htl;jobs', 'Company careers':'https://www.google.com/'};
+ const roots={Naukri:'https://www.naukri.com/',LinkedIn:'https://www.linkedin.com/jobs/',Indeed:'https://www.indeed.com/',Glassdoor:'https://www.glassdoor.com/Job/index.htm','Other Site':state.browserAssistant.otherUrl};
  if(!search)return roots[state.browserAssistant.portal];
  const keyword=String(state.browserAssistant.keyword||'').trim();
  const location=String(state.browserAssistant.location||'').trim();
  if(!keyword&&!location)throw new Error('Enter a job title, keywords, or location before starting a search.');
- state.query=keyword;
+ const experience=state.browserAssistant.experience==='Fresher / Entry level'?'fresher entry level':state.browserAssistant.experience==='Any experience'?'':state.browserAssistant.experience;
+ const workMode=state.browserAssistant.workMode==='Any'?'':state.browserAssistant.workMode;
+ state.query=[keyword,experience,workMode].filter(Boolean).join(' ');
  state.location=location;
+ if(state.browserAssistant.portal==='Other Site')return validateBrowserUrl(state.browserAssistant.otherUrl);
  return buildBoardSearchUrl(state.browserAssistant.portal);
 }
 
 async function openBrowserAssistant(search) {
  if(!state.browserAssistant.sessionConsent){
-  const consent=window.confirm('Menix uses a saved browser profile for job portals. Sign-in cookies may remain between app launches. Sign out on the portal to end a saved login. Continue?');
+  const consent=window.confirm('The portal opens in an isolated browser profile. Sign-in cookies may persist between app launches. Sign out on the job site to end a saved login. Continue?');
   if(!consent)return;
   state.browserAssistant.sessionConsent=true;
  }
  const url=getBrowserAssistantUrl(search);
- let parsed;
- try{parsed=new URL(url);}catch{throw new Error('The portal search did not produce a valid URL.');}
- if(parsed.protocol!=='https:')throw new Error('Only HTTPS job portals can be opened.');
- const status=document.getElementById('browser-session-status');
- const host=document.getElementById('browser-session-host');
- state.browserAssistant.status='Opening Website';
- if(status)status.textContent=state.browserAssistant.status;
- document.querySelector('.browser-status-dot')?.classList.remove('is-active');
- try{
-  if(window.menixDesktop?.openApplication){
-   const result=await window.menixDesktop.openApplication(parsed.href);
-   state.browserAssistant.hostname=result.hostname;
-  }else{
-   const opened=window.open(parsed.href,'_blank','noopener,noreferrer');
-   if(!opened)throw new Error('The browser blocked the new tab. Allow pop-ups for Menix and try again.');
-   state.browserAssistant.hostname=parsed.hostname;
-  }
-  state.browserAssistant.status='User Browsing';
-  if(status)status.textContent=state.browserAssistant.status;
-  if(host)host.textContent=`Website: ${state.browserAssistant.hostname}. Sign in and search manually if required.`;
-  document.querySelector('.browser-status-dot')?.classList.add('is-active');
- }catch(error){
-  state.browserAssistant.status='Failed';
-  if(status)status.textContent=state.browserAssistant.status;
-  throw error;
- }
+ navigateBrowserView(url);
 }
 
-async function closeBrowserAssistant() {
- if(!window.menixDesktop?.closeApplicationWindow)throw new Error('Close the portal tab in your browser. Menix cannot close tabs in the external browser.');
- await window.menixDesktop.closeApplicationWindow();
- state.browserAssistant.status='Closed';
- state.browserAssistant.hostname='';
- const status=document.getElementById('browser-session-status');
+function validateBrowserUrl(rawUrl) {
+ let url;
+ try{url=new URL(String(rawUrl||''));}catch{throw new Error('Enter a valid portal HTTPS address.');}
+ if(url.protocol!=='https:'||url.username||url.password)throw new Error('Only public HTTPS links without embedded credentials can be opened.');
+ return url.href;
+}
+
+function embeddedBrowserView(){return document.querySelector('#browser-view-wrap webview');}
+function mountEmbeddedBrowser(){
+ const wrap=document.getElementById('browser-view-wrap');
+ if(!wrap||embeddedBrowserView())return;
+ if(!state.browserAssistant.sessionConsent)return;
+ const source=state.browserAssistant.url||getBrowserAssistantUrl(false);
+ state.browserAssistant.url=validateBrowserUrl(source);
+ state.browserAssistant.hostname=new URL(state.browserAssistant.url).hostname;
+ state.browserAssistant.status='Opening Website';
+ const status=document.getElementById('browser-session-status');if(status)status.textContent='Opening Website';
+ const address=document.getElementById('browser-address');if(address)address.value=state.browserAssistant.url;
+ const tab=document.getElementById('browser-current-tab');if(tab)tab.textContent=state.browserAssistant.hostname;
+ const src=` src="${esc(state.browserAssistant.url)}"`;
+ wrap.innerHTML=`<webview class="browser-embedded-view" partition="persist:menix-application-sessions" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"${src}></webview>`;
+ const view=embeddedBrowserView();
+ view.addEventListener('did-start-loading',()=>setBrowserViewStatus('Opening Website'));
+ view.addEventListener('did-finish-load',()=>syncBrowserViewLocation());
+ view.addEventListener('did-navigate',event=>syncBrowserViewLocation(event.url));
+ view.addEventListener('did-navigate-in-page',event=>syncBrowserViewLocation(event.url));
+ view.addEventListener('page-title-updated',event=>{const tab=document.getElementById('browser-current-tab');if(tab&&event.title)tab.textContent=event.title;});
+ view.addEventListener('did-fail-load',event=>{
+  if(event.errorCode===-3)return;
+  state.browserAssistant.status='Failed';
+  setBrowserViewStatus('Failed');
+  toast(`Portal could not load: ${event.errorDescription||'Network or website error'}`);
+ });
+}
+
+function navigateBrowserView(rawUrl){
+ const url=validateBrowserUrl(rawUrl);
+ state.browserAssistant.url=url;
+ state.browserAssistant.hostname=new URL(url).hostname;
+ state.browserAssistant.status='Opening Website';
+ const address=document.getElementById('browser-address');
+ const tab=document.getElementById('browser-current-tab');
+ if(address)address.value=url;
+ if(tab)tab.textContent=state.browserAssistant.hostname;
+ setBrowserViewStatus('Opening Website');
+ const view=embeddedBrowserView();
+ if(!view){mountEmbeddedBrowser();return;}
+ view.loadURL(url);
+}
+
+function syncBrowserViewLocation(rawUrl){
+ const view=embeddedBrowserView();
+ let url=rawUrl||view?.getURL()||'';
+ if(!url||url==='about:blank')return;
+ try{url=validateBrowserUrl(url);}catch{return;}
+ state.browserAssistant.url=url;
+ state.browserAssistant.hostname=new URL(url).hostname;
+ state.browserAssistant.status='User Browsing';
+ const address=document.getElementById('browser-address');
+ const tab=document.getElementById('browser-current-tab');
+ if(address)address.value=url;
+ if(tab)tab.textContent=state.browserAssistant.hostname;
+ setBrowserViewStatus('User Browsing');
+}
+
+function setBrowserViewStatus(status){
+ state.browserAssistant.status=status;
+ const statusElement=document.getElementById('browser-session-status');
  const host=document.getElementById('browser-session-host');
- const button=document.getElementById('browser-close-session');
- if(status)status.textContent=state.browserAssistant.status;
- if(host)host.textContent='Browser window closed. Your portal sign-in may remain saved; sign out on the portal to end it.';
- if(button)button.disabled=true;
- document.querySelector('.browser-status-dot')?.classList.remove('is-active');
+ const dot=document.getElementById('browser-status-dot');
+ if(statusElement)statusElement.textContent=status==='User Browsing'?'User Browsing':status;
+ if(host)host.textContent=state.browserAssistant.hostname||'Manual mode';
+ dot?.classList.toggle('is-active',status==='User Browsing');
+}
+
+function navigateEmbeddedBrowser(event){
+ event.preventDefault();
+ const address=document.getElementById('browser-address');
+ if(!address)return;
+ try{navigateBrowserView(address.value);}catch(error){toast(error.message);}
+}
+
+function closeEmbeddedBrowser(){
+ const view=embeddedBrowserView();
+ view?.remove();
+ state.browserAssistant.url='';
+ state.browserAssistant.hostname='';
+ state.browserAssistant.status='Closed';
+ state.browserAssistant.sessionConsent=false;
+ const wrap=document.getElementById('browser-view-wrap');
+ if(wrap)wrap.innerHTML='<div class="browser-empty-state"><div class="browser-empty-icon">◎</div><strong>Browser tab closed</strong><span>Your portal sign-in may remain saved. Sign out on the portal to end it.</span><button type="button" class="browser-open-empty" id="browser-empty-open">Reopen portal</button></div>';
+ document.getElementById('browser-empty-open')?.addEventListener('click',()=>openBrowserAssistant(false).catch(error=>toast(error.message)));
+ const address=document.getElementById('browser-address');if(address)address.value='';
+ const tab=document.getElementById('browser-current-tab');if(tab)tab.textContent=state.browserAssistant.portal;
+ setBrowserViewStatus('Closed');
+}
+
+async function openCurrentBrowserInWindow(){
+ const url=state.browserAssistant.url||getBrowserAssistantUrl(false);
+ if(!window.menixDesktop?.openApplication)throw new Error('Open-in-browser is available in the Menix desktop app.');
+ await window.menixDesktop.openApplication(validateBrowserUrl(url));
+}
+
+function renderBrowserDetails(){
+ const target=document.getElementById('browser-detail-content');
+ if(!target)return;
+ const job=state.browserAssistant.savedJobId?state.jobs.find(item=>Number(item.id)===Number(state.browserAssistant.savedJobId)):null;
+ document.querySelectorAll('[data-browser-tab]').forEach(button=>button.classList.toggle('active',button.dataset.browserTab===state.browserAssistant.selectedTab));
+ const detailsTab=state.browserAssistant.selectedTab==='details';
+ const jobTitle=job?.title||'';
+ const jobCompany=job?.company||'';
+ const score=Number(state.browserAssistant.match?.score);
+ const matchData=state.browserAssistant.match;
+ let body='';
+ if(detailsTab){
+  body=`<div class="browser-job-summary">${job?`<div class="browser-company-logo">${esc(initials(job.company||'Job').slice(0,1))}</div><div class="browser-job-heading"><strong>${esc(job.title)}</strong><span>${esc(job.company||'Company not specified')}</span><small>${esc(job.location||'Location not specified')} · ${esc(job.workMode||'Work arrangement not specified')}</small></div><button type="button" class="browser-bookmark" aria-label="Saved job">♧</button>`:`<div class="browser-job-empty"><strong>No job selected yet</strong><span>Choose a listing in the portal and enter its verified details below.</span></div>`}</div>
+   <form id="browser-save-job" class="browser-job-form">
+    <label class="browser-field"><span>Original job URL</span><input name="url" type="url" value="${esc(job?.url||'')}" placeholder="https://www.naukri.com/job-listings/..." ${job?'readonly':''} required></label>
+    <div class="browser-form-row"><label class="browser-field"><span>Job title</span><input name="title" value="${esc(jobTitle)}" placeholder="Full Stack Developer" ${job?'readonly':''} required></label><label class="browser-field"><span>Company</span><input name="company" value="${esc(jobCompany)}" placeholder="Company name" ${job?'readonly':''}></label></div>
+    <div class="browser-form-row"><label class="browser-field"><span>Location</span><input name="location" value="${esc(job?.location||state.browserAssistant.location)}" placeholder="Remote" ${job?'readonly':''}></label><label class="browser-field"><span>Work arrangement</span><input name="workMode" value="${esc(job?.workMode||state.browserAssistant.workMode)}" placeholder="Remote / hybrid / on-site" ${job?'readonly':''}></label></div>
+    <label class="browser-field"><span>Experience requirements</span><input name="experienceRequirements" value="${esc(job?.experienceRequirements||state.browserAssistant.experience)}" placeholder="Fresher / 0-2 years" ${job?'readonly':''}></label>
+    <label class="browser-field"><span>Key skills</span><input name="requiredSkills" value="${esc(job?.requiredSkills||'')}" placeholder="Java, SQL, PostgreSQL" ${job?'readonly':''}></label>
+    <label class="browser-field"><span>Verified notes (optional)</span><textarea name="description" placeholder="Paste the description you reviewed on the original listing" ${job?'readonly':''}>${esc(job?.description||'')}</textarea></label>
+    <div class="browser-detail-actions"><button class="button browser-save-action" type="submit" ${job?'disabled':''}>${job?'Job Saved':'Save Job'}</button><button class="button browser-prepare-action" id="browser-prepare-application" type="button" ${job?'':'disabled'}>Prepare Application</button><button class="button browser-open-listing-action" id="browser-open-listing" type="button" ${job?'':'disabled'}>Open in Browser ↗</button></div>
+   </form>`;
+ }else if(state.browserAssistant.selectedTab==='ai'){
+  body=job&&matchData?`<div class="browser-match-heading"><strong>AI Match Analysis</strong><span>Profile-based match</span></div><div class="browser-match-analysis"><div class="browser-match-ring" style="--match-score:${Math.max(0,Math.min(100,score||0))}"><strong>${Number.isFinite(score)?score:0}%</strong><span>Match</span></div><ul>${(matchData.explanation||'').split(/[.;]\s*/).filter(Boolean).map(item=>`<li>${esc(item)}</li>`).join('')||'<li>Score calculated from your saved candidate profile and this job listing.</li>'}</ul></div><h4>Required skills</h4><div class="browser-skill-list">${(String(job.requiredSkills||'').split(/[,;|\\n]/).map(item=>item.trim()).filter(Boolean).map(skill=>`<span>${esc(skill)}</span>`).join(''))||'<span>Not listed by the job details provided</span>'}</div>`:`<div class="browser-tab-empty"><strong>${job?'Calculating your match…':'Match analysis is not available yet'}</strong><span>${job?'The score is generated from your saved profile and this job.':'Save a job after reviewing its real listing to calculate a profile match.'}</span></div>`;
+ }else if(state.browserAssistant.selectedTab==='prepare'){
+  body=`<div class="browser-tab-content"><h3>Prepare Application</h3><p>${job?`Prepare materials for <strong>${esc(job.title)}</strong> at ${esc(job.company||'the employer')}.`: 'Save a selected job before preparing an application.'}</p><div class="browser-safe-note">Your resume and profile information stays under your review. Menix will not fill sensitive questions or submit the application for you.</div><button class="button browser-prepare-action" id="browser-prepare-tab-action" type="button" ${job?'':'disabled'}>Choose Resume &amp; Prepare</button></div>`;
+ }else{
+  body=`<div class="browser-tab-content"><h3>Review &amp; Submit</h3><p>Check the employer's application form, resume attachment, and every answer in the portal.</p><div class="browser-safe-note">Submission is always a manual action on the employer website. Menix records it only after you confirm the outcome in your application tracker.</div><button class="button browser-open-listing-action" id="browser-review-open" type="button" ${job?'':'disabled'}>Open Original Listing ↗</button></div>`;
+ }
+ target.innerHTML=body;
+ document.getElementById('browser-save-job')?.addEventListener('submit',saveBrowserAssistantJob);
+ document.getElementById('browser-prepare-application')?.addEventListener('click',()=>prepareBrowserAssistantJob(job));
+ document.getElementById('browser-prepare-tab-action')?.addEventListener('click',()=>prepareBrowserAssistantJob(job));
+ document.getElementById('browser-open-listing')?.addEventListener('click',()=>job&&openJobOnOriginalSite(job));
+ document.getElementById('browser-review-open')?.addEventListener('click',()=>job&&openJobOnOriginalSite(job));
+ if(job&&state.browserAssistant.selectedTab==='ai'&&!matchData)loadBrowserAssistantMatch(job.id);
+}
+
+async function loadBrowserAssistantMatch(jobId){
+ try{
+  state.browserAssistant.match=await api(`/jobs/${jobId}/match`);
+  if(state.page==='browser'&&state.browserAssistant.selectedTab==='ai')renderBrowserDetails();
+ }catch(error){toast(`Could not calculate job match: ${error.message}`);}
+}
+
+async function prepareBrowserAssistantJob(job){
+ if(!job){toast('Save a selected job before preparing an application.');return;}
+ state.browserAssistant.selectedTab='prepare';
+ renderBrowserDetails();
+ await applyToJob(Number(job.id));
+}
+
+async function openJobOnOriginalSite(job){
+ const url=job.applyUrl||job.url;
+ if(!url){toast('This saved job does not have an original HTTPS URL.');return;}
+ try{
+  navigateBrowserView(url);
+ }catch(error){toast(`Could not open original listing: ${error.message}`);}
 }
 
 async function saveBrowserAssistantJob(event) {
  event.preventDefault();
  const form=event.currentTarget;
  const data=Object.fromEntries(new FormData(form));
- let url;
- try{url=new URL(String(data.url||''));}catch{toast('Enter a valid public HTTPS job URL.');return;}
- if(url.protocol!=='https:'||url.username||url.password){toast('Only public HTTPS job URLs without embedded credentials can be saved.');return;}
- data.url=url.href;
+ try{data.url=validateBrowserUrl(data.url);}catch(error){toast(error.message);return;}
  data.source=`${state.browserAssistant.portal} (manual)`;
  try{
   const job=await api('/jobs',{method:'POST',body:JSON.stringify(data)});
-  state.jobs.unshift(job);
+  state.jobs=[job,...state.jobs.filter(item=>Number(item.id)!==Number(job.id))];
   state.browserAssistant.savedJobId=job.id;
-  state.browserAssistant.status='Job Selected';
+  state.browserAssistant.match=null;
+  state.browserAssistant.selectedTab='details';
   toast('Selected job saved. Review the details before preparing an application.');
-  await renderBrowserAssistant();
+  renderBrowserDetails();
+  if(state.browserAssistant.url)syncBrowserViewLocation();
  }catch(error){toast(error.message);}
 }
 
@@ -511,6 +638,7 @@ function buildBoardSearchUrl(platform){
   if(platform==='Indeed')url=`https://in.indeed.com/jobs?q=${encodeURIComponent(keywords)}&l=${encodeURIComponent(loc)}`;
  if(platform==='Naukri')url=`https://www.naukri.com/jobs-in-india?keyword=${encodeURIComponent(title)}&location=${encodeURIComponent(loc)}`;
  if(platform==='LinkedIn')url=`https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keywords)}&location=${encodeURIComponent(loc)}&f_E=1%2C2`;
+ if(platform==='Glassdoor')url=`https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(title)}&locT=N&locKeyword=${encodeURIComponent(loc)}`;
   if(platform==='Company careers'){
    const titleQuery=/full[\s-]?stack/i.test(title)?'("full stack" OR "full-stack" OR fullstack OR "software engineer" OR "software developer")':title;
    const keywordSkills=title.replace(/full[\s-]?stack/gi,' ').replace(/\b(?:software|developer|engineer|fresher|junior|intern)\b/gi,' ').split(/[,\s]+/).map(skill=>skill.trim()).filter(skill=>skill.length>1);

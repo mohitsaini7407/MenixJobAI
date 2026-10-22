@@ -26,7 +26,7 @@ function rememberPlatform(hostname) {
 function validHttpsUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
-    return url.protocol === 'https:' ? url : null;
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password ? url : null;
   } catch { return null; }
 }
 
@@ -56,6 +56,33 @@ function createWindow() {
     const safe = validHttpsUrl(url);
     if (safe) openApplicationBrowser(safe.href, true);
     return { action: 'deny' };
+  });
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const sourceUrl = validHttpsUrl(params.src || '');
+    if (!sourceUrl || params.partition !== APPLICATION_PARTITION) {
+      event.preventDefault();
+      return;
+    }
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+    webPreferences.webSecurity = true;
+    delete webPreferences.preload;
+    webPreferences.allowRunningInsecureContent = false;
+    webPreferences.webviewTag = false;
+  });
+  win.webContents.on('did-attach-webview', (_event, guest) => {
+    guest.setWindowOpenHandler(({ url }) => {
+      const safe = validHttpsUrl(url);
+      if (safe) openApplicationBrowser(safe.href, true);
+      return { action: 'deny' };
+    });
+    guest.on('will-navigate', (event, url) => {
+      if (!validHttpsUrl(url)) event.preventDefault();
+    });
+    guest.on('will-redirect', (event, url) => {
+      if (!validHttpsUrl(url)) event.preventDefault();
+    });
   });
 }
 
