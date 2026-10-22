@@ -66,9 +66,17 @@ public class JobMatchingService {
     }
     public boolean fresh(JobListing j, String range, Instant now) {
         if(j.getPostedAt()!=null&&j.getPostedAt().isAfter(now))return false;
-        if("all".equalsIgnoreCase(range)) return true;
-        int hours=switch(Objects.toString(range,"24h").toLowerCase(Locale.ROOT)){case "3d"->72;case "7d"->168;default->24;};
-        if(j.getPostedAt()!=null) return !j.getPostedAt().isAfter(now)&&Duration.between(j.getPostedAt(),now).toHours()<=hours;
+        if(j.getPublishedAt()!=null&&j.getPublishedAt().isAfter(LocalDate.ofInstant(now,ZoneOffset.UTC)))return false;
+        String selected=Objects.toString(range,"24h").toLowerCase(Locale.ROOT);
+        if("all".equals(selected)) return true;
+        if("older".equals(selected)) {
+            if(j.isExactPostingTime()&&j.getPostedAt()!=null)return Duration.between(j.getPostedAt(),now).toHours()>168;
+            LocalDate postingDate=j.getPublishedAt()!=null?j.getPublishedAt()
+                    :j.getPostedAt()!=null?LocalDate.ofInstant(j.getPostedAt(),ZoneOffset.UTC):null;
+            return postingDate!=null&&ChronoUnit.DAYS.between(postingDate,LocalDate.ofInstant(now,ZoneOffset.UTC))>7;
+        }
+        int hours=switch(selected){case "3d"->72;case "7d"->168;default->24;};
+        if(j.isExactPostingTime()&&j.getPostedAt()!=null)return Duration.between(j.getPostedAt(),now).toHours()<=hours;
         if(hours==24||j.getPublishedAt()==null)return false;
         long days=ChronoUnit.DAYS.between(j.getPublishedAt(),LocalDate.ofInstant(now,ZoneOffset.UTC));return days>=0&&days<hours/24;
     }

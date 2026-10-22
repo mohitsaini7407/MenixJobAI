@@ -34,12 +34,16 @@ public class ApiController {
     private final SourceRegistryService sourceRegistry;
     private final OutreachService outreach;
     private final PortalCapabilityRegistry portalCapabilities;
+    private final AutofillSessionRepository autofillSessions;
+    private final SmartApplyAnswerRepository smartApplyAnswers;
+    private final SmartApplyPreferencesRepository smartApplyPreferences;
     @Value("${app.upload-dir:./uploads}") private String uploadDir;
-    private static final Set<String> STATUSES = Set.of("DISCOVERED","SHORTLISTED","DRAFT","AWAITING_APPROVAL","NEEDS_ATTENTION","APPLYING","SUBMITTED","SUBMISSION_FAILED","INTERVIEW","REJECTED","OFFER","WITHDRAWN","DECLINED");
+    @Value("${app.job-verification-max-age-hours:48}") private long verificationMaxAgeHours;
+    private static final Set<String> STATUSES = Set.of("DISCOVERED","SHORTLISTED","DRAFT","AWAITING_APPROVAL","NEEDS_ATTENTION","APPLYING","SUBMITTED","SUBMISSION_FAILED","INTERVIEW","REJECTED","OFFER","WITHDRAWN","DECLINED","NOT_COMPLETED_YET");
     private static final List<String> SKILLS = List.of("java","spring boot","sql","postgresql","python","javascript","typescript","react","node.js","docker","aws","kubernetes","rest api","git","hibernate","jpa","microservices");
 
-    public ApiController(ProfileRepository profiles, JobRepository jobs, ApplicationRepository applications, JobSourceService source, ResumeParserService resumeParser, JobMatchingService matching, GeminiMatchService gemini, SourceRegistryService sourceRegistry, OutreachService outreach, PortalCapabilityRegistry portalCapabilities) {
-        this.profiles=profiles; this.jobs=jobs; this.applications=applications; this.source=source; this.resumeParser=resumeParser; this.matching=matching; this.gemini=gemini; this.sourceRegistry=sourceRegistry; this.outreach=outreach; this.portalCapabilities=portalCapabilities;
+    public ApiController(ProfileRepository profiles, JobRepository jobs, ApplicationRepository applications, JobSourceService source, ResumeParserService resumeParser, JobMatchingService matching, GeminiMatchService gemini, SourceRegistryService sourceRegistry, OutreachService outreach, PortalCapabilityRegistry portalCapabilities, AutofillSessionRepository autofillSessions, SmartApplyAnswerRepository smartApplyAnswers, SmartApplyPreferencesRepository smartApplyPreferences) {
+        this.profiles=profiles; this.jobs=jobs; this.applications=applications; this.source=source; this.resumeParser=resumeParser; this.matching=matching; this.gemini=gemini; this.sourceRegistry=sourceRegistry; this.outreach=outreach; this.portalCapabilities=portalCapabilities; this.autofillSessions=autofillSessions; this.smartApplyAnswers=smartApplyAnswers; this.smartApplyPreferences=smartApplyPreferences;
     }
 
     @GetMapping("/health") public Map<String,Object> health(){ return Map.of("status","UP","service","menix-job-assistant","time",LocalDateTime.now().toString()); }
@@ -48,27 +52,131 @@ public class ApiController {
     @PutMapping("/profile") public CandidateProfile saveProfile(@RequestBody CandidateProfile incoming) {
         CandidateProfile p=getProfile();
         p.setFullName(incoming.getFullName()); p.setEmail(incoming.getEmail()); p.setHeadline(incoming.getHeadline());
-        p.setPhone(incoming.getPhone()); p.setLinkedinUrl(incoming.getLinkedinUrl()); p.setGithubUrl(incoming.getGithubUrl()); p.setPortfolioUrl(incoming.getPortfolioUrl());
+        p.setPhone(incoming.getPhone()); p.setCurrentLocation(incoming.getCurrentLocation()); p.setLinkedinUrl(incoming.getLinkedinUrl()); p.setGithubUrl(incoming.getGithubUrl()); p.setPortfolioUrl(incoming.getPortfolioUrl());
         p.setSkills(incoming.getSkills()); p.setPreferredTitles(incoming.getPreferredTitles()); p.setPreferredLocations(incoming.getPreferredLocations());
-        p.setEducation(incoming.getEducation()); p.setMinimumSalary(incoming.getMinimumSalary()); p.setProjects(incoming.getProjects()); p.setExperience(incoming.getExperience());
+        p.setEducation(incoming.getEducation()); p.setMinimumSalary(incoming.getMinimumSalary()); p.setDegree(incoming.getDegree()); p.setGraduationYear(incoming.getGraduationYear());
+        p.setNoticePeriod(incoming.getNoticePeriod()); p.setWorkAuthorization(incoming.getWorkAuthorization()); p.setSponsorshipAnswer(incoming.getSponsorshipAnswer());
+        p.setProjects(incoming.getProjects()); p.setExperience(incoming.getExperience());
         p.setExperienceLevel(incoming.getExperienceLevel());
         return profiles.save(p);
     }
 
-    @GetMapping("/jobs") public List<Map<String,Object>> listJobs(@RequestParam(required=false) String q, @RequestParam(defaultValue="24h") String freshness, @RequestParam(defaultValue="80") int minScore, @RequestParam(defaultValue="match") String sort, @RequestParam(required=false) String location, @RequestParam(required=false) String role, @RequestParam(defaultValue="0") int limit) {
+    @GetMapping("/smart-apply/answers") public List<SmartApplyAnswer> listSmartApplyAnswers(){
+        return smartApplyAnswers.findAll().stream()
+                .sorted(Comparator.comparing(SmartApplyAnswer::getApprovedAt,Comparator.nullsLast(Comparator.reverseOrder())))
+                .toList();
+    }
+    @PostMapping("/smart-apply/answers") @ResponseStatus(HttpStatus.CREATED)
+    public SmartApplyAnswer approveSmartApplyAnswer(@RequestBody Map<String,Object> body){
+        String question=boundedText(body.get("question"),"question",1000,true);
+        String answer=boundedText(body.get("answer"),"answer",8000,true);
+        String key=questionKey(question);
+        Optional<SmartApplyAnswer> existing=smartApplyAnswers.findByQuestionKey(key);
+        if(existing.isPresent()){
+            if(!existing.get().getAnswer().equals(answer))
+                throw new ResponseStatusException(HttpStatus.CONFLICT,"A different approved answer already exists for this question. Edit that answer instead.");
+            return existing.get();
+        }
+        SmartApplyAnswer item=new SmartApplyAnswer();
+        item.setQuestion(question);item.setQuestionKey(key);item.setAnswer(answer);
+        item.setCategory(boundedText(body.getOrDefault("category","General"),"category",80,false));
+        item.setSource(boundedText(body.getOrDefault("source","Manual"),"source",32,false));
+        item.setApprovedAt(java.time.Instant.now());
+        return smartApplyAnswers.save(item);
+    }
+    @PutMapping("/smart-apply/answers/{id}") public SmartApplyAnswer updateSmartApplyAnswer(@PathVariable Long id,@RequestBody Map<String,Object> body){
+        SmartApplyAnswer item=smartApplyAnswers.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Saved answer not found."));
+        String question=boundedText(body.getOrDefault("question",item.getQuestion()),"question",1000,true);
+        String answer=boundedText(body.getOrDefault("answer",item.getAnswer()),"answer",8000,true);
+        String key=questionKey(question);
+        smartApplyAnswers.findByQuestionKey(key).filter(other->!other.getId().equals(id)).ifPresent(other->{
+            if(!other.getAnswer().equals(answer))throw new ResponseStatusException(HttpStatus.CONFLICT,"A conflicting approved answer already exists for this question.");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"This question already has a duplicate saved answer.");
+        });
+        String source=boundedText(body.getOrDefault("source",item.getSource()),"source",32,false);
+        if(!item.getAnswer().equals(answer)){
+            item.setCorrectionCount(item.getCorrectionCount()+1);
+            item.setApprovedAt(java.time.Instant.now());
+        }else if(!item.getQuestion().equals(question)||!item.getSource().equals(source)){
+            item.setApprovedAt(java.time.Instant.now());
+        }
+        item.setQuestion(question);item.setQuestionKey(key);item.setAnswer(answer);
+        item.setSource(source);
+        item.setCategory(boundedText(body.getOrDefault("category",item.getCategory()),"category",80,false));
+        item.setExcluded(Boolean.parseBoolean(Objects.toString(body.getOrDefault("excluded",item.isExcluded()),"false")));
+        return smartApplyAnswers.save(item);
+    }
+    @PostMapping("/smart-apply/answers/{id}/used") public SmartApplyAnswer recordSmartApplyAnswerUse(@PathVariable Long id){
+        SmartApplyAnswer item=smartApplyAnswers.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Saved answer not found."));
+        item.setUsageCount(item.getUsageCount()+1);item.setLastUsedAt(java.time.Instant.now());
+        return smartApplyAnswers.save(item);
+    }
+    @DeleteMapping("/smart-apply/answers/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteSmartApplyAnswer(@PathVariable Long id){
+        if(!smartApplyAnswers.existsById(id))throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Saved answer not found.");
+        smartApplyAnswers.deleteById(id);
+    }
+    @DeleteMapping("/smart-apply/answers") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void clearSmartApplyAnswers(){smartApplyAnswers.deleteAll();}
+    @GetMapping("/smart-apply/preferences") public SmartApplyPreferences getSmartApplyPreferences(){
+        return smartApplyPreferences.findById(1L).orElseGet(()->smartApplyPreferences.save(new SmartApplyPreferences()));
+    }
+    @PutMapping("/smart-apply/preferences") public SmartApplyPreferences saveSmartApplyPreferences(@RequestBody Map<String,Object> body){
+        SmartApplyPreferences preferences=getSmartApplyPreferences();
+        preferences.setAutomaticReuseApprovedAnswers(Boolean.parseBoolean(Objects.toString(body.getOrDefault("automaticReuseApprovedAnswers",preferences.isAutomaticReuseApprovedAnswers()),"false")));
+        preferences.setLearningEnabled(Boolean.parseBoolean(Objects.toString(body.getOrDefault("learningEnabled",preferences.isLearningEnabled()),"true")));
+        double high=boundedThreshold(body.getOrDefault("highConfidenceThreshold",preferences.getHighConfidenceThreshold()),"highConfidenceThreshold");
+        double medium=boundedThreshold(body.getOrDefault("mediumConfidenceThreshold",preferences.getMediumConfidenceThreshold()),"mediumConfidenceThreshold");
+        if(medium>=high)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The medium confidence threshold must be lower than the high threshold.");
+        preferences.setHighConfidenceThreshold(high);preferences.setMediumConfidenceThreshold(medium);
+        return smartApplyPreferences.save(preferences);
+    }
+    private String boundedText(Object value,String name,int maxLength,boolean required){
+        String text=Objects.toString(value,"").trim();
+        if(required&&text.isBlank())throw new ResponseStatusException(HttpStatus.BAD_REQUEST,name+" is required.");
+        if(text.length()>maxLength)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,name+" exceeds "+maxLength+" characters.");
+        return text;
+    }
+    private String questionKey(String question){
+        String key=question.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]+"," ").trim().replaceAll("\\s+"," ");
+        if(key.isBlank())throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Question must contain letters or numbers.");
+        return key;
+    }
+    private double boundedThreshold(Object value,String name){
+        try{
+            double threshold=Double.parseDouble(Objects.toString(value,""));
+            if(!Double.isFinite(threshold)||threshold<0.5||threshold>1.0)throw new NumberFormatException();
+            return threshold;
+        }catch(NumberFormatException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,name+" must be between 0.5 and 1.0.");}
+    }
+
+    @GetMapping("/jobs") public List<Map<String,Object>> listJobs(@RequestParam(required=false) String q, @RequestParam(defaultValue="24h") String freshness, @RequestParam(defaultValue="80") int minScore, @RequestParam(defaultValue="match") String sort, @RequestParam(required=false) String location, @RequestParam(required=false) String role, @RequestParam(defaultValue="true") boolean activeOnly, @RequestParam(defaultValue="0") int limit) {
         CandidateProfile profile=getProfile();
+        java.time.Instant now=java.time.Instant.now();
         Set<Long> inactive=applications.findAll().stream().filter(a->Set.of("DECLINED","SUBMITTED","NEEDS_ATTENTION","APPLYING").contains(a.getStatus())).map(JobApplication::getJobId).collect(Collectors.toSet());
-        return jobs.findAll().stream().filter(j->!isRemovedProvider(j)).filter(j->!inactive.contains(j.getId())).filter(j->q==null || (j.getTitle()+" "+j.getCompany()+" "+j.getLocation()+" "+j.getRequiredSkills()).toLowerCase().contains(q.toLowerCase()))
-          .filter(j->matching.fresh(j,freshness,java.time.Instant.now()))
+        return jobs.findAll().stream().filter(j->!isRemovedProvider(j)).filter(j->!Set.of("CLOSED","EXPIRED","INVALID").contains(Objects.toString(j.getAvailabilityStatus(),"").toUpperCase(Locale.ROOT)))
+          .filter(j->!inactive.contains(j.getId())).filter(j->!activeOnly||isCurrentlyVerified(j,now)).filter(j->q==null || (j.getTitle()+" "+j.getCompany()+" "+j.getLocation()+" "+j.getRequiredSkills()).toLowerCase().contains(q.toLowerCase()))
+          .filter(j->matching.fresh(j,freshness,now))
           .filter(j->locationMatches(j,location))
           .filter(j->role==null||j.getTitle().toLowerCase().contains(role.toLowerCase()))
-          .map(j->{Map<String,Object> m=jobMap(j);Map<String,Object> score=matching.score(j,profile,java.time.Instant.now());m.putAll(score);return m;})
+          .map(j->{Map<String,Object> m=jobMap(j);Map<String,Object> score=matching.score(j,profile,now);m.putAll(score);return m;})
           .filter(j->(int)j.get("score")>=Math.max(0,Math.min(100,minScore)))
           .sorted(sort.equalsIgnoreCase("posted")?Comparator.comparing(m->Objects.toString(m.get("postedAt"),""),Comparator.reverseOrder()):sort.equalsIgnoreCase("discovered")?Comparator.comparing(m->Objects.toString(m.get("retrievedAt"),""),Comparator.reverseOrder()):Comparator.comparingInt((Map<String,Object> m)->(int)m.get("score")).reversed())
           .limit(limit>0?Math.min(limit,500):Long.MAX_VALUE)
           .collect(Collectors.toList());
     }
-    @GetMapping("/stats") public Map<String,Object> dashboardStats(@RequestParam(defaultValue="true") boolean includeStrongMatches){List<JobListing> all=jobs.findAll().stream().filter(job->!isRemovedProvider(job)).toList();java.time.Instant now=java.time.Instant.now();long fresh=all.stream().filter(j->matching.fresh(j,"24h",now)).count();Map<String,Object> stats=new HashMap<>();stats.put("totalJobs",all.size());stats.put("newIn24Hours",fresh);if(includeStrongMatches){CandidateProfile profile=getProfile();long strong=all.stream().filter(job->(int)matching.score(job,profile,now).get("score")>=80).count();stats.put("strongMatches",strong);}return stats;}
+    @GetMapping("/stats") public Map<String,Object> dashboardStats(@RequestParam(defaultValue="true") boolean includeStrongMatches,@RequestParam(defaultValue="7d") String freshness,@RequestParam(defaultValue="80") int minScore){
+        java.time.Instant now=java.time.Instant.now();
+        Set<Long> inactive=applications.findAll().stream().filter(a->Set.of("DECLINED","SUBMITTED","NEEDS_ATTENTION","APPLYING").contains(a.getStatus())).map(JobApplication::getJobId).collect(Collectors.toSet());
+        List<JobListing> eligible=jobs.findAll().stream().filter(job->!isRemovedProvider(job)&&!inactive.contains(job.getId()))
+                .filter(job->!Set.of("CLOSED","EXPIRED","INVALID").contains(Objects.toString(job.getAvailabilityStatus(),"").toUpperCase(Locale.ROOT)))
+                .filter(job->isCurrentlyVerified(job,now)&&matching.fresh(job,freshness,now)).toList();
+        Map<String,Object> stats=new HashMap<>();stats.put("totalJobs",eligible.size());
+        stats.put("newIn24Hours",eligible.stream().filter(job->matching.fresh(job,"24h",now)).count());
+        stats.put("freshness",freshness);stats.put("verifiedJobs",eligible.size());
+        if(includeStrongMatches){CandidateProfile profile=getProfile();long strong=eligible.stream().filter(job->(int)matching.score(job,profile,now).get("score")>=Math.max(0,Math.min(100,minScore))).count();stats.put("strongMatches",strong);}
+        return stats;
+    }
     @GetMapping("/jobs/{id}") public JobListing getJob(@PathVariable Long id){JobListing j=jobs.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found"));j.setDescription(cleanDescription(j.getDescription()));return j;}
     @PostMapping("/jobs") @ResponseStatus(HttpStatus.CREATED) public JobListing addJob(@RequestBody JobListing input) {
         if(!input.getUrl().isBlank()) {
@@ -83,8 +191,33 @@ public class ApiController {
         if(input.getCompany().isBlank()) input.setCompany(input.getUrl().isBlank()?"Company not specified":hostFromUrl(input.getUrl()));
         if(input.getApplyUrl().isBlank()) input.setApplyUrl(input.getUrl());
         if(input.getAttributionUrl().isBlank()) input.setAttributionUrl(input.getUrl());
-        input.setSource(input.getSource().isBlank()?"External Link":input.getSource()); input.setRetrievedAt(LocalDateTime.now());
+        input.setSource(input.getSource().isBlank()?"External Link":input.getSource()); input.setRetrievedAt(LocalDateTime.now());input.setImportMethod("MANUAL");input.setAvailabilityStatus("UNVERIFIED");
         return jobs.save(input);
+    }
+    @PostMapping("/jobs/reconcile") public Map<String,Object> reconcileJobLifecycle(){
+        java.time.Instant cutoff=java.time.Instant.now().minus(java.time.Duration.ofHours(verificationMaxAgeHours));
+        List<JobListing> records=jobs.findAll();
+        Map<String,Long> canonicalCounts=records.stream().map(job->canonicalForReconciliation(job.getUrl()))
+                .filter(url->!url.isBlank()).collect(Collectors.groupingBy(url->url,Collectors.counting()));
+        long duplicateGroups=canonicalCounts.values().stream().filter(count->count>1).count();
+        long duplicateRecords=canonicalCounts.values().stream().filter(count->count>1).mapToLong(count->count-1).sum();
+        int markedUnverified=0,markedStale=0,markedInvalid=0;
+        for(JobListing job:records){
+            if(canonicalForReconciliation(job.getUrl()).isBlank()){
+                if(!"INVALID".equalsIgnoreCase(job.getAvailabilityStatus())){job.setAvailabilityStatus("INVALID");markedInvalid++;}
+            }else if(job.getAvailabilityStatus()==null||job.getAvailabilityStatus().isBlank()){
+                job.setAvailabilityStatus("UNVERIFIED");markedUnverified++;
+            }else if("OPEN".equalsIgnoreCase(job.getAvailabilityStatus())&&job.getLastVerifiedAt()==null){
+                job.setAvailabilityStatus("UNVERIFIED");markedUnverified++;
+            }else if("OPEN".equalsIgnoreCase(job.getAvailabilityStatus())&&job.getLastVerifiedAt().isBefore(cutoff)){
+                job.setAvailabilityStatus("STALE");markedStale++;
+            }
+        }
+        jobs.saveAll(records);
+        long savedRecords=applications.findAll().stream().filter(app->"SHORTLISTED".equalsIgnoreCase(app.getStatus())).count();
+        return Map.of("recordsExamined",records.size(),"markedUnverified",markedUnverified,"markedStale",markedStale,
+                "markedInvalid",markedInvalid,"duplicateGroups",duplicateGroups,"duplicateRecords",duplicateRecords,
+                "savedRecordsPreserved",savedRecords,"applicationRecordsPreserved",applications.count(),"deletedRecords",0);
     }
     @PostMapping("/jobs/sync") public Map<String,Object> syncJobs(){
         try { return source.sync(); } catch(RestClientException e) {
@@ -94,6 +227,64 @@ public class ApiController {
     @PostMapping("/jobs/sync/{sourceName}") public Map<String,Object> syncOne(@PathVariable String sourceName){return source.syncSource(sourceName);}
     @GetMapping("/sources") public Map<String,Object> sources(){return source.status();}
     @GetMapping("/portal-capabilities") public List<Map<String,Object>> portalCapabilities(){return portalCapabilities.list(source.status());}
+    @GetMapping("/autofill/capabilities") public List<Map<String,Object>> autofillCapabilities(){
+        List<Map<String,Object>> capabilities=new ArrayList<>();
+        capabilities.add(Map.of("adapter","accessible-form","provider","Generic","automation","USER_PERMISSION_REQUIRED",
+                "controls",List.of("text","email","tel","url","date","number","select","radio","skills-checkbox"),
+                "resumeUpload","NATIVE_FILE_CHOOSER_USER_SELECTS_FILE","multiStep","RESCAN_EACH_STEP",
+                "limitations","Only visible accessible controls; custom widgets, sensitive questions, CAPTCHA, and unsupported flows require manual entry."));
+        capabilities.add(Map.of("adapter","accessible-form","provider","Google Forms","automation","GENERIC_ACCESSIBLE_ONLY",
+                "providerSpecificAdapter",false,"limitations","Forms may use custom or cross-origin controls. Only visible accessible controls can be inspected; confirm the form owner permits assisted interaction."));
+        for(String provider:List.of("Greenhouse","Lever","Ashby","Workday","Workable")){
+            capabilities.add(Map.of("adapter","accessible-form","provider",provider,"automation","GENERIC_ACCESSIBLE_ONLY",
+                    "providerSpecificAdapter",false,"limitations","Host recognized only. Provider-specific controls and terms are not validated; use manual entry when the generic accessible form cannot handle the page."));
+        }
+        capabilities.add(Map.of("adapter","none","provider","LinkedIn","automation","DISABLED",
+                "limitations","Automated application assistance is disabled on this platform."));
+        return List.copyOf(capabilities);
+    }
+    @GetMapping("/autofill/sessions") public List<AutofillSession> listAutofillSessions(){
+        return autofillSessions.findAll().stream().sorted(Comparator.comparing(AutofillSession::getUpdatedAt,Comparator.nullsLast(Comparator.reverseOrder()))).toList();
+    }
+    @PostMapping("/autofill/sessions") @ResponseStatus(HttpStatus.CREATED) public AutofillSession startAutofillSession(@RequestBody Map<String,Object> body){
+        Long jobId=asLong(body.get("jobId"));
+        Long applicationId=asLong(body.get("applicationId"));
+        jobs.findById(jobId).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found."));
+        JobApplication application=applications.findById(applicationId).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Application record not found."));
+        if(!Objects.equals(application.getJobId(),jobId))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The application record does not match the selected job.");
+        AutofillSession session=new AutofillSession();
+        session.setJobId(jobId);session.setApplicationId(applicationId);session.setStatus("READY");
+        session.setUpdatedAt(LocalDateTime.now());
+        return autofillSessions.save(session);
+    }
+    @PutMapping("/autofill/sessions/{id}") public AutofillSession updateAutofillSession(@PathVariable Long id,@RequestBody Map<String,Object> body){
+        AutofillSession session=autofillSessions.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Autofill session not found."));
+        String status=Objects.toString(body.getOrDefault("status",session.getStatus()),"");
+        if(!Set.of("READY","DETECTING_FIELDS","AUTOFILLING","NEEDS_REVIEW","SUBMITTED","FAILED").contains(status))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Unsupported autofill session status.");
+        if("SUBMITTED".equals(session.getStatus())&&!"SUBMITTED".equals(status))
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"A confirmed submission session cannot be changed to an unsubmitted state.");
+        int detected=boundedCounter(body.getOrDefault("fieldsDetected",session.getFieldsDetected()),"fieldsDetected");
+        int filled=boundedCounter(body.getOrDefault("fieldsFilled",session.getFieldsFilled()),"fieldsFilled");
+        if(filled>detected)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Filled fields cannot exceed detected fields.");
+        String diagnostic=Objects.toString(body.getOrDefault("diagnostic",session.getDiagnostic()),"").trim();
+        if(diagnostic.length()>1000)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The session diagnostic is too long.");
+        if("SUBMITTED".equals(status)){
+            JobApplication application=applications.findById(session.getApplicationId()).orElseThrow(()->new ResponseStatusException(HttpStatus.CONFLICT,"The application record is unavailable."));
+            if(!"SUBMITTED".equals(application.getStatus())||application.getSubmissionEvidence().isBlank())
+                throw new ResponseStatusException(HttpStatus.CONFLICT,"A session can be marked submitted only after verified application confirmation is stored.");
+        }
+        session.setStatus(status);session.setFieldsDetected(detected);session.setFieldsFilled(filled);session.setDiagnostic(diagnostic);session.setUpdatedAt(LocalDateTime.now());
+        return autofillSessions.save(session);
+    }
+
+    private int boundedCounter(Object value,String name){
+        try{
+            int count=Integer.parseInt(Objects.toString(value,""));
+            if(count<0||count>5000)throw new NumberFormatException();
+            return count;
+        }catch(NumberFormatException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,name+" must be between 0 and 5000.");}
+    }
     @GetMapping("/sources/manual") public List<JobSourceConnection> manualSources(){return sourceRegistry.list();}
     @PostMapping("/sources/manual") @ResponseStatus(HttpStatus.CREATED) public JobSourceConnection addManualSource(@RequestBody Map<String,Object> body){try{return sourceRegistry.add(body);}catch(IllegalArgumentException e){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,e.getMessage());}}
     @PutMapping("/sources/manual/{id}") public JobSourceConnection updateManualSource(@PathVariable Long id,@RequestBody Map<String,Object> body){try{return sourceRegistry.update(id,body);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}}
@@ -128,6 +319,87 @@ public class ApiController {
         jobs.save(j); return ai;
     }
 
+    @PostMapping("/resumes/application-draft") public List<Map<String,String>> applicationDraft(@RequestBody Map<String,Object> request) {
+        if(!Boolean.TRUE.equals(request.get("consent")))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Explicit consent is required before sending the selected resume text, relevant profile fields, and job details to Gemini.");
+        String storageName=Objects.toString(request.get("storageName"),"");
+        if(!storageName.matches("[0-9a-fA-F-]{36}_[A-Za-z0-9._-]{1,180}"))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Saved resume identifier is invalid.");
+        Long jobId=asLong(request.get("jobId"));
+        List<Map<String,Object>> formFields=validateApplicationFormFields(request.get("fields"));
+        JobListing job=jobs.findById(jobId).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found."));
+        Path directory=Paths.get(uploadDir).toAbsolutePath().normalize();
+        Path file=directory.resolve(storageName).normalize();
+        if(!file.startsWith(directory)||Files.isSymbolicLink(file)||!Files.isRegularFile(file))throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Saved resume was not found.");
+        try {
+            String resumeText=resumeParser.extractForDraft(file);
+            return gemini.draftApplication(job,getProfile(),resumeText,formFields);
+        } catch(IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,e.getMessage(),e);
+        } catch(ResponseStatusException e) {
+            throw e;
+        } catch(Exception e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The saved resume could not be read for drafting.",e);
+        }
+    }
+
+    private List<Map<String,Object>> validateApplicationFormFields(Object rawFields) {
+        if(!(rawFields instanceof List<?> fields)||fields.isEmpty()||fields.size()>80)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Provide between 1 and 80 supported blank form fields.");
+        List<Map<String,Object>> validated=new ArrayList<>();
+        Set<String> ids=new HashSet<>();
+        int totalChars=0;
+        Set<String> supportedTypes=Set.of("text","textarea","email","tel","url","number","date","select","radio");
+        java.util.regex.Pattern sensitive=java.util.regex.Pattern.compile("(?i)\\b(work authorization|visa|sponsor(ship)?|salary|compensation|gender|sex|ethnicity|race|disabilit(y|ies)|veteran|citizenship|date of birth|birth ?date|age|social security|ssn|tax id|criminal|conviction|background check|security clearance|consent|agree|terms and conditions|legally authorized|authorized to work|are you|do you|will you|have you ever|how many years)\\b");
+        for(Object item:fields){
+            if(!(item instanceof Map<?,?> field))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"A form field description is invalid.");
+            String id=boundedFieldText(field.get("id"),16,"id");
+            String type=boundedFieldText(field.get("type"),16,"type");
+            String label=boundedFieldText(field.get("label"),500,"label");
+            String name=boundedFieldText(field.get("name"),180,"name");
+            String context=boundedFieldText(field.get("context"),700,"context");
+            String placeholder=boundedFieldText(field.get("placeholder"),250,"placeholder");
+            Object rawMaxLength=field.get("maxLength");
+            if(rawMaxLength!=null&&!(rawMaxLength instanceof Number))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Form field length constraint is invalid.");
+            int maxLength=rawMaxLength instanceof Number number?Math.max(0,Math.min(5000,number.intValue())):5000;
+            if(!id.matches("f[0-9]{1,3}")||!ids.add(id)||!supportedTypes.contains(type)||label.isBlank())
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"A form field description is unsupported or duplicated.");
+            if(sensitive.matcher(label+" "+name+" "+context+" "+placeholder).find())
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Sensitive or consent-related fields must be completed manually.");
+            Map<String,Object> safeField=new LinkedHashMap<>();
+            safeField.put("id",id);safeField.put("type",type);safeField.put("label",label);
+            safeField.put("name",name);safeField.put("context",context);safeField.put("placeholder",placeholder);
+            safeField.put("required",Boolean.TRUE.equals(field.get("required")));
+            safeField.put("maxLength",maxLength==0?5000:maxLength);
+            Object rawOptions=field.get("options");
+            List<Map<String,String>> options=new ArrayList<>();
+            if(rawOptions!=null){
+                if(!(rawOptions instanceof List<?> choices)||choices.size()>40||!(type.equals("select")||type.equals("radio")))
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Form choices are invalid.");
+                for(Object choice:choices){
+                    if(!(choice instanceof Map<?,?> optionData))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Form choice is invalid.");
+                    String optionValue=boundedFieldText(optionData.get("value"),200,"option value");
+                    String optionLabel=boundedFieldText(optionData.get("label"),200,"option label");
+                    if(optionValue.isBlank()||optionLabel.isBlank())continue;
+                    if(sensitive.matcher(optionLabel).find())throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Sensitive form choices must be completed manually.");
+                    options.add(Map.of("value",optionValue,"label",optionLabel));
+                }
+            }
+            if((type.equals("select")||type.equals("radio"))&&options.isEmpty())
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Choice fields must include their available options.");
+            safeField.put("options",List.copyOf(options));
+            totalChars+=id.length()+type.length()+label.length()+name.length()+context.length()+placeholder.length()+options.stream().mapToInt(option->option.get("value").length()+option.get("label").length()).sum();
+            if(totalChars>24000)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The visible form contains too much text to analyze safely.");
+            validated.add(Map.copyOf(safeField));
+        }
+        return List.copyOf(validated);
+    }
+
+    private String boundedFieldText(Object value,int maxLength,String fieldName) {
+        if(value==null)return "";
+        if(!(value instanceof String text)||text.length()>maxLength)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Form field "+fieldName+" is invalid or too long.");
+        return text.trim();
+    }
+
     @GetMapping("/applications") public List<JobApplication> listApplications(){return applications.findAll().stream().sorted(Comparator.comparing(JobApplication::getUpdatedAt,Comparator.nullsLast(Comparator.reverseOrder()))).toList();}
     @PostMapping("/applications") @ResponseStatus(HttpStatus.CREATED) public synchronized JobApplication addApplication(@RequestBody Map<String,Object> body) {
         Long jobId=asLong(body.get("jobId")); JobListing j=jobs.findById(jobId).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found"));
@@ -156,7 +428,7 @@ public class ApiController {
         if("SUBMITTED".equals(a.getStatus())) return a;
         if(a.getId()==null){a.setJobId(jobId);a.setJobTitle(j.getTitle());a.setCompany(j.getCompany());}
         a.setStatus("NEEDS_ATTENTION");
-        a.setNotes("Application started. Complete and submit the employer form yourself, then update the tracker after confirmation. Menix does not have a verified submission integration for this listing.");
+        a.setNotes("Application started in Browser Assistant. Review the employer form and use AutoApply only when permitted; submission requires explicit confirmation and employer evidence.");
         a.setUpdatedAt(LocalDateTime.now());
         return applications.save(a);
     }
@@ -286,8 +558,15 @@ public class ApiController {
     private boolean sameSkill(String left,String right){return canonicalSkill(left).equals(canonicalSkill(right));}
     private String canonicalSkill(String value){String s=value.toLowerCase(Locale.ROOT).trim();return switch(s){case "js"->"javascript";case "node"->"node.js";case "postgres"->"postgresql";case "restful api","restful apis"->"rest api";case "reactjs"->"react";default->s;};}
     private Set<String> split(String s){if(s==null||s.isBlank())return Set.of();return Arrays.stream(s.toLowerCase().split("[,;|\\n]")).map(String::trim).filter(x->!x.isBlank()).collect(Collectors.toCollection(LinkedHashSet::new));}
+    private boolean isCurrentlyVerified(JobListing job,java.time.Instant now){
+        return "OPEN".equalsIgnoreCase(job.getAvailabilityStatus())&&job.getLastVerifiedAt()!=null
+                &&!job.getLastVerifiedAt().isBefore(now.minus(java.time.Duration.ofHours(verificationMaxAgeHours)));
+    }
+    private String canonicalForReconciliation(String raw){
+        try{return canonicalHttpsUrl(raw,"Job URL");}catch(ResponseStatusException invalid){return "";}
+    }
     private Map<String,Object> jobMap(JobListing j) {
-        Map<String,Object> m=new LinkedHashMap<>();m.put("id",j.getId());m.put("title",j.getTitle());m.put("company",j.getCompany());m.put("location",j.getLocation());m.put("url",j.getUrl());m.put("applyUrl",j.getApplyUrl());m.put("source",j.getSource());m.put("providerBadge",Set.of("Remotive","Arbeitnow","Jobicy","Greenhouse","Lever").contains(j.getSource())?"Direct API":"External Link");m.put("employmentType",j.getEmploymentType());m.put("experienceLevel",j.getExperienceLevel());m.put("experienceRequirements",j.getExperienceRequirements());m.put("workMode",j.getWorkMode());m.put("salary",j.getSalary());m.put("description",cleanDescription(j.getDescription()));m.put("requiredSkills",j.getRequiredSkills());m.put("publishedAt",j.getPublishedAt());m.put("postedAt",j.getPostedAt());m.put("exactPostingTime",j.isExactPostingTime());m.put("attributionUrl",j.getAttributionUrl());m.put("retrievedAt",j.getRetrievedAt());return m;
+        Map<String,Object> m=new LinkedHashMap<>();m.put("id",j.getId());m.put("title",j.getTitle());m.put("company",j.getCompany());m.put("location",j.getLocation());m.put("url",j.getUrl());m.put("applyUrl",j.getApplyUrl());m.put("source",j.getSource());m.put("providerBadge",Set.of("Remotive","Arbeitnow","Jobicy","Greenhouse","Lever").contains(j.getSource())?"Direct API":"External Link");m.put("employmentType",j.getEmploymentType());m.put("experienceLevel",j.getExperienceLevel());m.put("experienceRequirements",j.getExperienceRequirements());m.put("workMode",j.getWorkMode());m.put("salary",j.getSalary());m.put("description",cleanDescription(j.getDescription()));m.put("requiredSkills",j.getRequiredSkills());m.put("publishedAt",j.getPublishedAt());m.put("postedAt",j.getPostedAt());m.put("exactPostingTime",j.isExactPostingTime());m.put("attributionUrl",j.getAttributionUrl());m.put("retrievedAt",j.getRetrievedAt());m.put("firstSeenAt",j.getFirstSeenAt());m.put("lastSeenAt",j.getLastSeenAt());m.put("lastVerifiedAt",j.getLastVerifiedAt());m.put("lastSuccessfulSyncAt",j.getLastSuccessfulSyncAt());m.put("availabilityStatus",j.getAvailabilityStatus());m.put("importMethod",j.getImportMethod());return m;
     }
     private String cleanDescription(String raw){if(raw==null)return "";return raw.replace("\u00c2\u00a0"," ").replaceAll("(?is)please mention the word.{0,500}?(?:read the job post completely|show you read).{0,120}?(?:\\.|$)"," ").replaceAll("(?i)\\btag\\s+[A-Za-z0-9+/=]{12,}"," ").replaceAll("(?i)#[A-Za-z0-9+/=]{12,}"," ").replaceAll("(?is)this is a beta feature to avoid spam applicants\\.?"," ").replaceAll("\\s+"," ").trim();}
 }

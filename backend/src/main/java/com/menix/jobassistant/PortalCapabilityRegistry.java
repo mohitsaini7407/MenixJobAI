@@ -31,7 +31,8 @@ public class PortalCapabilityRegistry {
             boolean external = SEARCH_LINKS.contains(name);
             Map<String, Object> source = actual.getOrDefault(name, Map.of());
             boolean configured = Boolean.TRUE.equals(source.get("enabled"));
-            boolean connected = source.get("lastSuccessfulSync") != null;
+            Object lastSuccessfulSync = source.get("lastSuccessfulSync");
+            boolean connected = lastSuccessfulSync instanceof String value && !value.isBlank();
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("portal", name);
             row.put("providerType", direct ? "PUBLIC_API" : employerApi ? "EMPLOYER_BOARD_API" : "EXTERNAL_SEARCH");
@@ -42,9 +43,13 @@ public class PortalCapabilityRegistry {
             row.put("messagingRead", "UNAVAILABLE");
             row.put("messagingSend", "UNAVAILABLE");
             row.put("applicationSubmission", "EXTERNAL_MANUAL");
-            row.put("connectionState", direct || configured ? connected ? "CONNECTED" : "NOT_TESTED" : "NOT_CONNECTED");
+            row.put("connectionState", source.get("error") instanceof String error && !error.isBlank()
+                    ? "ERROR" : direct || configured ? connected ? "CONNECTED" : "NOT_TESTED" : "NOT_CONNECTED");
             row.put("lastSuccessfulSync", source.get("lastSuccessfulSync"));
             row.put("error", source.get("error"));
+            for (String key : List.of("lastAttempt","fetched","imported","updated","rejected","deduplicated","verifiedJobs","verificationMaxAgeHours")) {
+                if (source.containsKey(key)) row.put(key, source.get(key));
+            }
             row.put("limitations", limitation(name));
             result.add(row);
         }

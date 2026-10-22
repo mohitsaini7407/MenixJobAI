@@ -11,6 +11,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,6 +22,8 @@ import java.util.stream.Collectors;
 @Service
 public class ResumeParserService {
     private static final int MAX_FIELD_CHARS = 3500;
+    private static final int MAX_RESUME_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_EXTRACTED_CHARS = 20000;
     private static final List<String> SKILLS = List.of(
         "Java", "Spring Boot", "Spring", "SQL", "PostgreSQL", "MySQL", "MongoDB", "Python", "JavaScript", "TypeScript",
         "React", "Angular", "Vue", "Node.js", "Express", "HTML", "CSS", "REST API", "GraphQL", "Docker", "Kubernetes",
@@ -62,6 +67,25 @@ public class ResumeParserService {
     private String extract(MultipartFile file) throws Exception {
         String filename = Objects.toString(file.getOriginalFilename(), "").toLowerCase(Locale.ROOT);
         byte[] bytes = file.getBytes();
+        return extract(bytes, filename);
+    }
+
+    public String extractForDraft(Path file) throws Exception {
+        long size = Files.size(file);
+        if (size <= 0 || size > MAX_RESUME_BYTES) throw new IllegalArgumentException("Saved resume is empty or exceeds the 8 MB limit.");
+        String filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        byte[] bytes;
+        try (InputStream input = Files.newInputStream(file)) {
+            bytes = input.readNBytes(MAX_RESUME_BYTES + 1);
+        }
+        if (bytes.length > MAX_RESUME_BYTES) throw new IllegalArgumentException("Saved resume exceeds the 8 MB limit.");
+        String text = extract(bytes, filename);
+        String bounded = text.replace('\u0000', ' ').trim();
+        if (bounded.isBlank()) throw new IllegalArgumentException("No selectable text was found. Scanned resumes need OCR before they can be used.");
+        return bounded.substring(0, Math.min(bounded.length(), MAX_EXTRACTED_CHARS));
+    }
+
+    private String extract(byte[] bytes, String filename) throws Exception {
         if (filename.endsWith(".txt")) return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
         if (filename.endsWith(".pdf")) {
             try (PDDocument document = Loader.loadPDF(bytes)) { return new PDFTextStripper().getText(document); }

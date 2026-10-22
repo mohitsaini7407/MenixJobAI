@@ -1,7 +1,7 @@
 const API_BASE = 'http://localhost:8080/api';
 const GET_CACHE_TTL_MS = 60000;
 const getCache = new Map();
-const state = { page: 'dashboard', jobs: [], applications: [], outreach: [], portalCapabilities: [], profile: null, sources: [], stats: {}, aiStatus: { enabled: false }, selectedJob: null, detailReturnPage: null, query: '', location: '', careerStage: localStorage.getItem('menix-career-stage') || 'fresher', freshness: localStorage.getItem('menix-freshness') || '24h', minScore: Number(localStorage.getItem('menix-min-score') || 80), jobMinScore: Number(localStorage.getItem('menix-job-min-score') || 0), sort: 'match', applicationTabs: [], activeApplicationTab: null, outreachTab: 'drafts', activeOutreachId: null, browserAssistant: { portal: 'Naukri', status: 'Not Started', hostname: '', url: '', keyword: '', location: '', experience: 'Fresher / Entry level', workMode: 'Remote', otherUrl: '', savedJobId: null, selectedTab: 'details', match: null, sessionConsent: false }, automaticSyncStarted: false };
+const state = { page: 'dashboard', jobs: [], applications: [], outreach: [], portalCapabilities: [], profile: null, smartApplyAnswers: [], smartApplyPreferences: { automaticReuseApprovedAnswers: false, learningEnabled: true, highConfidenceThreshold: 0.85, mediumConfidenceThreshold: 0.55 }, sources: [], stats: {}, aiStatus: { enabled: false }, selectedJob: null, detailReturnPage: null, query: '', location: '', careerStage: localStorage.getItem('menix-career-stage') || 'fresher', freshness: localStorage.getItem('menix-freshness') || '24h', dashboardFreshness: localStorage.getItem('menix-dashboard-freshness') || '24h', minScore: Number(localStorage.getItem('menix-min-score') || 80), jobMinScore: Number(localStorage.getItem('menix-job-min-score') || 0), sort: 'match', outreachTab: 'drafts', activeOutreachId: null, autoApply: { selectedJobId: '', selectedResume: localStorage.getItem('menix-selected-resume') || '', resumeOptions: [], permissionConfirmed: false, fields: [], uploads: [], submitCandidates: [], sessions: [], status: 'Ready' }, browserAssistant: { portal: 'Naukri', status: 'Not Started', hostname: '', url: '', keyword: '', location: '', experience: 'Fresher / Entry level', workMode: 'Remote', otherUrl: '', savedJobId: null, selectedTab: 'details', match: null, autoApplyTab: null, sessionConsent: false }, automaticSyncStarted: false };
 const content = document.getElementById('content');
 const accountAvatarStorageKey = 'menix-account-avatar';
 
@@ -26,6 +26,11 @@ async function api(path, options = {}) {
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try { const data = await response.json(); message = data.message || data.error || message; } catch {}
+    if(response.status===405&&path==='/resumes/application-draft'){
+      message='The backend currently running is outdated and does not support Gemini form autofill. Restart the Spring Boot backend from the project’s backend folder, then try again.';
+    }
+    if(response.status===404&&path.startsWith('/autofill/'))message='The backend currently running does not include the AutoApply API. Restart Spring Boot from the project’s backend folder, then retry.';
+    if(response.status===404&&path.startsWith('/smart-apply/'))message='The backend currently running does not include Smart Apply Memory. Restart Spring Boot from this project’s backend folder, then retry.';
     const error=new Error(message);
     error.status=response.status;
     error.path=path;
@@ -48,9 +53,10 @@ function initials(name='Company') { return name.trim().split(/\s+/).slice(0,2).m
 function money(value) { return value ? esc(value) : ''; }
 function known(value, fallback='') { const v=String(value||'').trim(); return !v||/^not specified$/i.test(v)||/^unknown$/i.test(v)?fallback:esc(v); }
 function jobRow(job) {
- const posted=job.postedAt?new Date(job.postedAt).toLocaleDateString():job.publishedAt||'Date unavailable';
+ const posted=job.postedAt?new Date(job.postedAt).toLocaleDateString():job.publishedAt||'Posting date unverified';
  const discovered=job.retrievedAt?`Discovered ${new Date(job.retrievedAt).toLocaleDateString()}`:'Discovery date unavailable';
- const meta=[known(job.location,'Location not specified'),known(job.workMode),`Posted ${posted}`,discovered].filter(Boolean).join(' · ');
+ const verified=job.lastVerifiedAt?`Verified ${new Date(job.lastVerifiedAt).toLocaleDateString()}`:!job.availabilityStatus||job.availabilityStatus==='UNVERIFIED'?'Availability unverified':'Not recently verified';
+ const meta=[known(job.location,'Location not specified'),known(job.workMode),`Posted ${posted}`,discovered,verified].filter(Boolean).join(' · ');
  const bucket=careerBucket(job); const score=Number(job.matchScore ?? job.score ?? 0);
  const skills=(job.matchedSkills||String(job.requiredSkills||'').split(/[,;|]/)).filter(Boolean).slice(0,3);
  const saved=state.applications.some(a=>Number(a.jobId)===Number(job.id)&&a.status==='SHORTLISTED');
@@ -72,23 +78,27 @@ function jobRow(job) {
 function stat(label,value,foot) { return `<div class="card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`; }
 async function refreshData() {
   const page=state.page;
-  const needsJobs=['dashboard','jobs','saved','interview'].includes(page)||(page==='messages'&&state.jobs.length===0);
-  const needsApplications=['dashboard','jobs','applications','saved'].includes(page);
+  const needsJobs=['dashboard','jobs','saved','interview','browser'].includes(page)||(page==='messages'&&state.jobs.length===0);
+  const needsApplications=['dashboard','jobs','applications','saved','browser'].includes(page);
   const needsSources=['dashboard','sources'].includes(page);
-  const needsProfile=['dashboard','profile','jobs','interview'].includes(page)||(page==='messages'&&!state.profile);
+  const needsProfile=['dashboard','profile','jobs','interview','browser','settings'].includes(page)||(page==='messages'&&!state.profile);
   const needsStats=page==='dashboard';
-  const needsAiStatus=['dashboard','jobs','job-detail'].includes(page);
-  const params=new URLSearchParams({freshness:page==='dashboard'?'7d':page==='saved'?'all':state.freshness,minScore:page==='dashboard'||page==='saved'?'0':String(page==='jobs'?state.jobMinScore:state.minScore),sort:page==='dashboard'?'match':state.sort});
-  if(page==='dashboard')params.set('limit','50');
+  const needsAiStatus=['dashboard','jobs','job-detail','browser'].includes(page);
+  const needsSmartApply=page==='browser'||page==='settings';
+  const selectedFreshness=page==='dashboard'?state.dashboardFreshness:page==='saved'||page==='browser'?'all':state.freshness;
+  const params=new URLSearchParams({freshness:selectedFreshness,minScore:page==='dashboard'||page==='saved'||page==='browser'?'0':String(page==='jobs'?state.jobMinScore:state.minScore),sort:page==='dashboard'?'match':state.sort,activeOnly:page==='saved'?'false':'true'});
+  if(page==='dashboard'){params.set('limit','50');params.set('activeOnly','true');}
   if(state.query&&page==='jobs') params.set('q',state.query);
   if(state.location&&page==='jobs') params.set('location',state.location);
-  const [profile,jobs,apps,sources,stats,aiStatus] = await Promise.all([
+  const [profile,jobs,apps,sources,stats,aiStatus,smartApplyAnswers,smartApplyPreferences] = await Promise.all([
     needsProfile?api('/profile'):Promise.resolve(null),
     needsJobs?api(`/jobs?${params}`):Promise.resolve(null),
     needsApplications?api('/applications'):Promise.resolve(null),
     needsSources?api('/sources'):Promise.resolve(null),
-    needsStats?api('/stats?includeStrongMatches=false'):Promise.resolve(null),
-    needsAiStatus?api('/ai/status'):Promise.resolve(null)
+    needsStats?api(`/stats?includeStrongMatches=true&freshness=${encodeURIComponent(selectedFreshness)}&minScore=${state.minScore}`):Promise.resolve(null),
+    needsAiStatus?api('/ai/status'):Promise.resolve(null),
+    needsSmartApply?api('/smart-apply/answers'):Promise.resolve(null),
+    needsSmartApply?api('/smart-apply/preferences'):Promise.resolve(null)
   ]);
   if(profile)state.profile=profile;
   if(jobs)state.jobs=jobs.map(j=>({...j,matchScore:j.score}));
@@ -96,6 +106,8 @@ async function refreshData() {
   if(sources)state.sources=sources.sources||[];
   if(stats)state.stats=stats;
   if(aiStatus)state.aiStatus=aiStatus;
+  if(smartApplyAnswers)state.smartApplyAnswers=smartApplyAnswers;
+  if(smartApplyPreferences)state.smartApplyPreferences=smartApplyPreferences;
   const accountName=document.getElementById('account-name');
   const accountAvatar=document.getElementById('account-avatar');
   const accountAvatarImage=document.getElementById('account-avatar-image');
@@ -116,6 +128,7 @@ async function refreshData() {
   }
 }
 function go(page) {
+  if(page==='autoapply')page='browser';
   if (page === state.page) return;
   state.page = page;
   window.history.pushState({page,selectedJob:state.selectedJob,detailReturnPage:state.detailReturnPage},'');
@@ -123,9 +136,10 @@ function go(page) {
   render().catch(showError);
 }
 function updateNavigation(page){
-  document.body.classList.toggle('dashboard-page',page==='dashboard');
-  document.body.classList.toggle('browser-assistant-active',page==='browser');
-  const activePage=page==='job-detail'?state.detailReturnPage:page;
+  const normalizedPage=page==='autoapply'?'browser':page;
+  document.body.classList.toggle('dashboard-page',normalizedPage==='dashboard');
+  document.body.classList.toggle('browser-assistant-active',normalizedPage==='browser');
+  const activePage=normalizedPage==='job-detail'?state.detailReturnPage:normalizedPage;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === activePage));
 }
 function showError(error) {
@@ -137,6 +151,7 @@ function showError(error) {
   document.getElementById('retry')?.addEventListener('click', () => render().catch(showError));
 }
 async function render() {
+  if(state.page==='autoapply')state.page='browser';
   document.body.classList.toggle('dashboard-page',state.page==='dashboard');
   try { await refreshData(); setConnection(true); }
   catch (e) { setConnection(false); throw e; }
@@ -150,7 +165,7 @@ async function render() {
   else if (state.page === 'messages') await renderOutreach();
   else if (state.page === 'capabilities') await renderPortalCapabilities();
   else if (state.page === 'saved') renderSaved();
-  else if (state.page === 'settings') renderSettings();
+  else if (state.page === 'settings') await renderSettings();
   else renderInterview();
 }
 
@@ -160,7 +175,7 @@ function renderBrowserAssistant() {
  const location=state.browserAssistant.location||state.location||String(profile.preferredLocations||'Remote').split(/[,;\n]/)[0];
  const portals=[['Naukri','Naukri.com'],['LinkedIn','LinkedIn'],['Indeed','Indeed'],['Glassdoor','Glassdoor'],['Other Site','Other Site']];
  content.innerHTML=`<section class="browser-assistant-page">
-  <header class="browser-page-heading"><div><h2>Browser Assistant</h2><p>Search and apply on official job websites with AI assistance. You stay in control.</p></div><div class="browser-supervision"><span class="browser-supervision-check">✓</span><div><strong>Supervised Mode</strong><small>Menix will not submit any application without your explicit approval.</small></div><button class="browser-learn-more" id="browser-learn-more">Learn more</button></div></header>
+  <header class="browser-page-heading"><div><h2>AutoApply</h2><p>Search official job websites, prepare applications, and fill supported fields. You stay in control.</p></div><div class="browser-supervision"><span class="browser-supervision-check">✓</span><div><strong>Supervised Mode</strong><small>Menix will not submit any application without your explicit approval.</small></div><button class="browser-learn-more" id="browser-learn-more">Learn more</button></div></header>
   <div class="browser-portal-row">${portals.map(([value,label])=>`<button type="button" class="browser-portal-button ${state.browserAssistant.portal===value?'active':''}" data-browser-portal="${esc(value)}"><span class="browser-portal-mark mark-${value.toLowerCase().replaceAll(' ','-')}">${value==='Naukri'?'◉':value==='LinkedIn'?'in':value==='Indeed'?'i':value==='Glassdoor'?'G':'↗'}</span>${esc(label)}</button>`).join('')}</div>
   <div class="browser-search-row">
    <label class="browser-control browser-title-control"><span>Job Title / Keywords</span><input id="browser-keyword" value="${esc(keyword)}" placeholder="Full Stack Developer"></label>
@@ -175,10 +190,10 @@ function renderBrowserAssistant() {
     <div class="browser-chrome-tab"><span class="browser-chrome-icon">${state.browserAssistant.portal==='Naukri'?'◉':'↗'}</span><span id="browser-current-tab">${esc(state.browserAssistant.hostname||portals.find(p=>p[0]===state.browserAssistant.portal)?.[1]||'Other Site')}</span><button type="button" id="browser-close-session" aria-label="Close browser tab">×</button><button type="button" id="browser-new-tab" aria-label="Open portal">+</button><span class="browser-chrome-spacer"></span><button type="button" id="browser-remove-view" aria-label="Close browser panel">×</button></div>
     <form class="browser-address-bar" id="browser-address-form"><button type="button" id="browser-back" aria-label="Back">‹</button><button type="button" id="browser-forward" aria-label="Forward">›</button><button type="button" id="browser-reload" aria-label="Reload">⟳</button><span class="browser-lock" aria-hidden="true">▣</span><input id="browser-address" aria-label="Website address" placeholder="Search the job portal manually"><button type="submit" aria-label="Open address">↵</button></form>
     <div class="browser-view-wrap" id="browser-view-wrap"><div class="browser-empty-state"><div class="browser-empty-icon">◎</div><strong>Ready to search</strong><span>Choose a portal and open its official website. Search and sign in there as you normally would.</span><button type="button" class="browser-open-empty" id="browser-empty-open">Open ${esc(state.browserAssistant.portal==='Other Site'?'website':portals.find(p=>p[0]===state.browserAssistant.portal)?.[1]||'website')}</button></div></div>
-    <div class="browser-status-line"><span class="browser-status-dot ${state.browserAssistant.status==='User Browsing'?'is-active':''}" id="browser-status-dot"></span><span id="browser-session-status">${esc(state.browserAssistant.status==='Not Started'?'Ready for Search':state.browserAssistant.status)}</span><span id="browser-session-host">${state.browserAssistant.hostname?esc(state.browserAssistant.hostname):'Manual mode'}</span><button type="button" id="browser-open-external">Open in Browser ↗</button></div>
+    <div class="browser-status-line"><span class="browser-status-dot ${state.browserAssistant.status==='User Browsing'?'is-active':''}" id="browser-status-dot"></span><span id="browser-session-status">${esc(state.browserAssistant.status==='Not Started'?'Ready for Search':state.browserAssistant.status)}</span><span id="browser-session-host">${state.browserAssistant.hostname?esc(state.browserAssistant.hostname):'Manual mode'}</span><button type="button" id="browser-open-external">Open in system browser ↗</button></div>
    </section>
    <aside class="browser-job-panel" aria-label="Selected job details">
-    <nav class="browser-detail-tabs" aria-label="Job assistant tabs"><button type="button" data-browser-tab="details" class="active">Job Details</button><button type="button" data-browser-tab="ai">AI Assistant</button><button type="button" data-browser-tab="prepare">Prepare Application</button><button type="button" data-browser-tab="review">Review &amp; Submit</button></nav>
+    <nav class="browser-detail-tabs" aria-label="AutoApply workspace tabs"><button type="button" data-browser-tab="details" class="active">Job Details</button><button type="button" data-browser-tab="ai">Job Match</button><button type="button" data-browser-tab="prepare">Detect &amp; Fill</button><button type="button" data-browser-tab="review">Review &amp; Submit</button><button type="button" data-browser-tab="history">Answer History</button></nav>
     <div id="browser-detail-content" class="browser-detail-content"></div>
    </aside>
   </div>
@@ -202,7 +217,7 @@ function renderBrowserAssistant() {
  document.getElementById('browser-forward').addEventListener('click',()=>embeddedBrowserView()?.canGoForward()&&embeddedBrowserView().goForward());
  document.getElementById('browser-reload').addEventListener('click',()=>embeddedBrowserView()?.reload());
  document.getElementById('browser-open-external').addEventListener('click',()=>openCurrentBrowserInWindow().catch(error=>toast(error.message)));
- document.getElementById('browser-learn-more').addEventListener('click',()=>toast('Menix helps organize and prepare applications. You review every answer and submit on the employer website yourself.'));
+ document.getElementById('browser-learn-more').addEventListener('click',()=>toast('AutoApply can fill supported fields after review. Submitting requires a separate confirmation, and the employer must confirm receipt.'));
  renderBrowserDetails();
  if(state.browserAssistant.sessionConsent&&(state.browserAssistant.portal!=='Other Site'||state.browserAssistant.otherUrl))mountEmbeddedBrowser();
 }
@@ -253,6 +268,7 @@ function mountEmbeddedBrowser(){
  const src=` src="${esc(state.browserAssistant.url)}"`;
  wrap.innerHTML=`<webview class="browser-embedded-view" partition="persist:menix-application-sessions" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"${src}></webview>`;
  const view=embeddedBrowserView();
+ if(state.browserAssistant.autoApplyTab)state.browserAssistant.autoApplyTab.view=view;
  view.addEventListener('did-start-loading',()=>setBrowserViewStatus('Opening Website'));
  view.addEventListener('did-finish-load',()=>syncBrowserViewLocation());
  view.addEventListener('did-navigate',event=>syncBrowserViewLocation(event.url));
@@ -354,14 +370,29 @@ function renderBrowserDetails(){
     <label class="browser-field"><span>Experience requirements</span><input name="experienceRequirements" value="${esc(job?.experienceRequirements||state.browserAssistant.experience)}" placeholder="Fresher / 0-2 years" ${job?'readonly':''}></label>
     <label class="browser-field"><span>Key skills</span><input name="requiredSkills" value="${esc(job?.requiredSkills||'')}" placeholder="Java, SQL, PostgreSQL" ${job?'readonly':''}></label>
     <label class="browser-field"><span>Verified notes (optional)</span><textarea name="description" placeholder="Paste the description you reviewed on the original listing" ${job?'readonly':''}>${esc(job?.description||'')}</textarea></label>
-    <div class="browser-detail-actions"><button class="button browser-save-action" type="submit" ${job?'disabled':''}>${job?'Job Saved':'Save Job'}</button><button class="button browser-prepare-action" id="browser-prepare-application" type="button" ${job?'':'disabled'}>Prepare Application</button><button class="button browser-open-listing-action" id="browser-open-listing" type="button" ${job?'':'disabled'}>Open in Browser ↗</button></div>
+    <div class="browser-detail-actions"><button class="button browser-save-action" type="submit" ${job?'disabled':''}>${job?'Job Saved':'Save Job'}</button><button class="button browser-prepare-action" id="browser-prepare-application" type="button" ${job?'':'disabled'}>Prepare Application</button><button class="button browser-open-listing-action" id="browser-open-listing" type="button" ${job?'':'disabled'}>Open in AutoApply</button></div>
    </form>`;
  }else if(state.browserAssistant.selectedTab==='ai'){
   body=job&&matchData?`<div class="browser-match-heading"><strong>AI Match Analysis</strong><span>Profile-based match</span></div><div class="browser-match-analysis"><div class="browser-match-ring" style="--match-score:${Math.max(0,Math.min(100,score||0))}"><strong>${Number.isFinite(score)?score:0}%</strong><span>Match</span></div><ul>${(matchData.explanation||'').split(/[.;]\s*/).filter(Boolean).map(item=>`<li>${esc(item)}</li>`).join('')||'<li>Score calculated from your saved candidate profile and this job listing.</li>'}</ul></div><h4>Required skills</h4><div class="browser-skill-list">${(String(job.requiredSkills||'').split(/[,;|\\n]/).map(item=>item.trim()).filter(Boolean).map(skill=>`<span>${esc(skill)}</span>`).join(''))||'<span>Not listed by the job details provided</span>'}</div>`:`<div class="browser-tab-empty"><strong>${job?'Calculating your match…':'Match analysis is not available yet'}</strong><span>${job?'The score is generated from your saved profile and this job.':'Save a job after reviewing its real listing to calculate a profile match.'}</span></div>`;
+ }else if(state.browserAssistant.selectedTab==='ai'){
+  body=job&&matchData?`<div class="browser-match-heading"><strong>AI Match Analysis</strong><span>Profile-based match</span></div><div class="browser-match-analysis"><div class="browser-match-ring" style="--match-score:${Math.max(0,Math.min(100,score||0))}"><strong>${Number.isFinite(score)?score:0}%</strong><span>Match</span></div><ul>${(matchData.explanation||'').split(/[.;]\s*/).filter(Boolean).map(item=>`<li>${esc(item)}</li>`).join('')||'<li>Score calculated from your saved candidate profile and this job listing.</li>'}</ul></div><h4>Required skills</h4><div class="browser-skill-list">${(String(job.requiredSkills||'').split(/[,;|\\n]/).map(item=>item.trim()).filter(Boolean).map(skill=>`<span>${esc(skill)}</span>`).join(''))||'<span>Not listed by the job details provided</span>'}</div>`:`<div class="browser-tab-empty"><strong>${job?'Calculating your match…':'Match analysis is not available yet'}</strong><span>${job?'The score is generated from your saved profile and this job.':'Save a job after reviewing its real listing to calculate a profile match.'}</span></div>`;
+ }else if(state.browserAssistant.selectedTab==='history'){
+  const answers=state.smartApplyAnswers.filter(answer=>!answer.excluded).slice(0,12);
+  body=`<div class="browser-tab-content browser-answer-history"><h3>Approved Answer History</h3><p>Previously approved answers can be suggested for similar questions. Review each answer before using it.</p>${answers.length?`<div class="browser-answer-list">${answers.map(answer=>`<article><strong>${esc(answer.question)}</strong><span>${esc(answer.answer)}</span><small>${esc(answer.category||'General')} · ${Number(answer.confidence||0)?`${Math.round(Number(answer.confidence)*100)}% confidence`:'Approved answer'}</small></article>`).join('')}</div>`:'<div class="browser-tab-empty"><strong>No approved answers yet</strong><span>Approve an answer during form review to build reusable memory.</span></div>'}<button type="button" id="browser-answer-memory-settings">View and edit all answers</button></div>`;
  }else if(state.browserAssistant.selectedTab==='prepare'){
-  body=`<div class="browser-tab-content"><h3>Prepare Application</h3><p>${job?`Prepare materials for <strong>${esc(job.title)}</strong> at ${esc(job.company||'the employer')}.`: 'Save a selected job before preparing an application.'}</p><div class="browser-safe-note">Your resume and profile information stays under your review. Menix will not fill sensitive questions or submit the application for you.</div><button class="button browser-prepare-action" id="browser-prepare-tab-action" type="button" ${job?'':'disabled'}>Choose Resume &amp; Prepare</button></div>`;
+  const autoApplyTab=state.browserAssistant.autoApplyTab;
+  if(autoApplyTab&&Number(autoApplyTab.jobId)===Number(job?.id)){
+   const resumes=state.autoApply.resumeOptions||[];
+   const selectedResume=state.autoApply.selectedResume||localStorage.getItem('menix-selected-resume')||'';
+   body=`<div class="browser-tab-content"><h3>AutoApply · ${esc(job.title)}</h3><p>The employer form and AutoApply controls stay together in this AutoApply workspace. Application destination: <strong>${esc(new URL(autoApplyTab.url).hostname)}</strong>. Verify the employer and form owner, especially on third-party pages.</p><label class="browser-field"><span>Saved resume (optional for profile autofill)</span><select id="application-resume"><option value="">${resumes.length?'No resume selected':'No saved resumes'}</option>${resumes.map(resume=>`<option value="${esc(resume.storageName)}" ${resume.storageName===selectedResume?'selected':''}>${esc(resume.filename)}</option>`).join('')}</select></label><label class="application-permission browser-application-permission"><input id="application-site-permission" type="checkbox" ${state.autoApply.permissionConfirmed?'checked':''}><span>I verified the destination and that this employer permits assisted form interaction</span></label><div class="browser-autoapply-actions"><button class="button" id="application-inspect" type="button">Detect Fields / Rescan Form</button><button class="button button-primary" id="application-autofill" type="button">Smart Autofill</button><button class="button" id="application-suggest-missing" type="button">Suggest Missing Answers</button><button class="button" id="application-clear-suggestions" type="button">Clear Current Suggestions</button><button class="button" id="application-review-button" type="button">Review Answers</button><button class="button" id="application-upload-resume" type="button" disabled>Choose resume file…</button><button class="button button-primary" id="application-submit-button" type="button" disabled>Submit application</button><button class="button button-quiet" id="application-view-memory" type="button">View / Edit Answer Memory</button></div><span id="application-status-badge" class="status-pill">${esc(autoApplyTab.status||'Ready')}</span><p id="application-assist-status" class="muted small" aria-live="polite">Detect fields to inspect supported controls; use Smart Autofill for known profile answers.</p><section id="application-field-review" class="application-field-review"><p class="muted">Detect fields to review supported controls.</p></section></div>`;
+  }else{
+   body=`<div class="browser-tab-content"><h3>Prepare Application</h3><p>${job?`Prepare materials for <strong>${esc(job.title)}</strong> at ${esc(job.company||'the employer')}.`: 'Save a selected job before preparing an application.'}</p><div class="browser-safe-note">The employer page and AutoApply controls stay together in this AutoApply workspace. Submission always requires your confirmation.</div><button class="button browser-prepare-action" id="browser-prepare-tab-action" type="button" ${job?'':'disabled'}>Open AutoApply in this window</button></div>`;
+  }
  }else{
-  body=`<div class="browser-tab-content"><h3>Review &amp; Submit</h3><p>Check the employer's application form, resume attachment, and every answer in the portal.</p><div class="browser-safe-note">Submission is always a manual action on the employer website. Menix records it only after you confirm the outcome in your application tracker.</div><button class="button browser-open-listing-action" id="browser-review-open" type="button" ${job?'':'disabled'}>Open Original Listing ↗</button></div>`;
+  const autoApplyTab=state.browserAssistant.autoApplyTab;
+  body=autoApplyTab&&Number(autoApplyTab.jobId)===Number(job?.id)
+   ?`<div class="browser-tab-content"><h3>Review &amp; Submit</h3><p>Check every answer on the employer form. The page and controls remain in this AutoApply workspace. Verify the employer and application destination on the page before continuing.</p><div class="browser-safe-note">Submission requires your explicit confirmation. The tracker changes to Submitted only after employer confirmation.</div><label class="application-permission browser-application-permission"><input id="application-site-permission" type="checkbox" ${state.autoApply.permissionConfirmed?'checked':''}><span>I verified the destination and that this employer permits assisted form interaction</span></label><div class="browser-autoapply-actions"><button class="button" id="application-review-button" type="button">Review form</button><button class="button button-primary" id="application-submit-button" type="button" disabled>Submit application</button></div><span id="application-status-badge" class="status-pill">${esc(autoApplyTab.status||'Ready')}</span><p id="application-assist-status" class="muted small" aria-live="polite">Review the employer form before submitting.</p><section id="application-field-review" class="application-field-review"><p class="muted">Detect fields in Prepare Application to inspect the form.</p></section></div>`
+   :`<div class="browser-tab-content"><h3>Review &amp; Submit</h3><p>Check the employer's application form, resume attachment, and every answer in the portal.</p><div class="browser-safe-note">Start AutoApply from Prepare Application to keep the form, review, and submission controls in this window.</div><button class="button browser-open-listing-action" id="browser-review-open" type="button" ${job?'':'disabled'}>Open Original Listing</button></div>`;
  }
  target.innerHTML=body;
  document.getElementById('browser-save-job')?.addEventListener('submit',saveBrowserAssistantJob);
@@ -369,6 +400,29 @@ function renderBrowserDetails(){
  document.getElementById('browser-prepare-tab-action')?.addEventListener('click',()=>prepareBrowserAssistantJob(job));
  document.getElementById('browser-open-listing')?.addEventListener('click',()=>job&&openJobOnOriginalSite(job));
  document.getElementById('browser-review-open')?.addEventListener('click',()=>job&&openJobOnOriginalSite(job));
+ document.getElementById('browser-answer-memory-settings')?.addEventListener('click',()=>go('settings'));
+ document.getElementById('application-resume')?.addEventListener('change',event=>{
+  state.autoApply.selectedResume=event.target.value;
+  localStorage.setItem('menix-selected-resume',event.target.value);
+  setApplicationAssistStatus(event.target.value?'Resume selected for an optional native upload. Detect the current form before autofilling.':'Resume selection cleared; profile-based autofill remains available.');
+ });
+ document.getElementById('application-site-permission')?.addEventListener('change',event=>{
+  state.autoApply.permissionConfirmed=event.target.checked;
+  const tab=activeApplicationTab();
+  const submit=document.getElementById('application-submit-button');
+  if(tab&&submit)submit.disabled=!window.MenixAutofillEngine.canSubmit({
+   reviewed:tab.reviewed,permissionConfirmed:event.target.checked,requiredMissing:tab.requiredMissing,
+   validationIssues:tab.validationIssues,unsupportedCount:tab.unsupported?.length||0,submitCandidateCount:tab.submitCandidates?.length||0,blocked:tab.scanBlocked
+  }).allowed;
+ });
+ document.getElementById('application-inspect')?.addEventListener('click',inspectAutoApplyForm);
+ document.getElementById('application-autofill')?.addEventListener('click',fillAutoApplyForm);
+ document.getElementById('application-suggest-missing')?.addEventListener('click',suggestMissingAnswers);
+ document.getElementById('application-clear-suggestions')?.addEventListener('click',()=>clearAutoApplySuggestions(activeApplicationTab()));
+ document.getElementById('application-view-memory')?.addEventListener('click',()=>go('settings'));
+ document.getElementById('application-review-button')?.addEventListener('click',reviewAutoApplyForm);
+ document.getElementById('application-upload-resume')?.addEventListener('click',uploadAutoApplyResume);
+ document.getElementById('application-submit-button')?.addEventListener('click',submitAutoApplyForm);
  if(job&&state.browserAssistant.selectedTab==='ai'&&!matchData)loadBrowserAssistantMatch(job.id);
 }
 
@@ -381,9 +435,60 @@ async function loadBrowserAssistantMatch(jobId){
 
 async function prepareBrowserAssistantJob(job){
  if(!job){toast('Save a selected job before preparing an application.');return;}
+ await startBrowserAssistantApplication(job);
+}
+
+async function startBrowserAssistantApplication(job, applicationRecord=null){
+ const url=job?.applyUrl||job?.url;
+ if(!job||!url){toast('This saved job does not have an application URL.');return false;}
+ let applicationUrl;
+ try{applicationUrl=validateBrowserUrl(url);}catch(error){toast(error.message);return false;}
+ if(!state.browserAssistant.sessionConsent){
+  const consent=window.confirm('The portal opens in Menix’s embedded browser. Sign-in cookies may persist between app launches. Continue?');
+  if(!consent)return false;
+  state.browserAssistant.sessionConsent=true;
+ }
+ const existing=state.applications.find(item=>Number(item.jobId)===Number(job.id));
+ if(existing&&!['SHORTLISTED','DISCOVERED','WITHDRAWN','NOT_COMPLETED_YET'].includes(String(existing.status||'').toUpperCase())&&existing.id!==applicationRecord?.id){
+  if(existing.status==='SUBMITTED')toast('This application is already confirmed as submitted.');
+  else toast('This job already has an application record. Update it in Applications to avoid creating a duplicate.');
+  return false;
+ }
+ let record=applicationRecord;
+ try{
+  if(!record)record=await api(`/jobs/${job.id}/apply`,{method:'POST'});
+  if(record.status==='SUBMITTED'){toast('This application is already confirmed as submitted.');return false;}
+  state.applications=[record,...state.applications.filter(item=>item.id!==record.id)];
+ }catch(error){toast(`Could not start this application: ${error.message}`);return false;}
+ let sessionId=null;
+ try{
+  const session=await api('/autofill/sessions',{method:'POST',body:JSON.stringify({jobId:Number(job.id),applicationId:record.id})});
+  sessionId=session.id;
+ }catch(error){toast(`Application started, but AutoApply session tracking is unavailable: ${error.message}`);}
+ state.autoApply.permissionConfirmed=false;
+ state.browserAssistant.savedJobId=Number(job.id);
  state.browserAssistant.selectedTab='prepare';
- renderBrowserDetails();
- await applyToJob(Number(job.id));
+ state.browserAssistant.url=applicationUrl;
+ state.browserAssistant.hostname=new URL(applicationUrl).hostname;
+ state.browserAssistant.autoApplyTab={
+  id:`browser-application-${record.id}`,label:`${job.company||'Company'} — ${job.title}`,url:applicationUrl,
+  view:null,jobId:Number(job.id),applicationId:record.id,sessionId,company:job.company||'the employer',
+  status:'Ready',fields:[],uploads:[],submitCandidates:[],reviewed:false,fieldsFilled:0
+ };
+ state.autoApply.status='Ready';
+ if(state.page!=='browser'){
+  state.page='browser';
+  window.history.pushState({page:'browser',selectedJob:state.selectedJob,detailReturnPage:'browser'},'');
+  updateNavigation('browser');
+ }
+ renderBrowserAssistant();
+ if(!state.autoApply.resumeOptions.length){
+  try{state.autoApply.resumeOptions=await api('/resumes');}
+  catch(error){toast(`Saved resumes could not load: ${error.message}`);}
+  renderBrowserDetails();
+ }
+ setAutoApplyStatus(state.browserAssistant.autoApplyTab,'Ready','Application opened in AutoApply. Select a resume, confirm site permission, and detect fields.');
+ return true;
 }
 
 async function openJobOnOriginalSite(job){
@@ -414,14 +519,16 @@ async function saveBrowserAssistantJob(event) {
 
 function renderDashboard() {
  const savedAvatar=localStorage.getItem(accountAvatarStorageKey);
- const dashboardThreshold=Math.max(80,state.minScore);
+ const dashboardThreshold=Math.max(0,Math.min(100,state.minScore));
  const recommendations=state.jobs
   .filter(stageAllows)
   .map(job=>({...job,matchScore:Number(job.score??scoreLocal(job))}))
-  .sort((a,b)=>b.matchScore-a.matchScore)
+  .sort((a,b)=>(Date.parse(b.postedAt||b.publishedAt||'')||0)-(Date.parse(a.postedAt||a.publishedAt||'')||0)||b.matchScore-a.matchScore)
   .slice(0,6);
- const savedCount=state.applications.filter(application=>application.status==='SHORTLISTED').length;
- const tracked=state.applications.filter(application=>!['SHORTLISTED','DISCOVERED'].includes(String(application.status||'').toUpperCase()));
+ const sourceFailure=state.sources.find(source=>source.enabled&&source.error);
+ const emptyJobsMessage=sourceFailure?`A source synchronization failed (${sourceFailure.source}). Check Sources for the diagnostic; old jobs are not shown as freshly verified.`:!state.sources.some(source=>Number(source.verifiedJobs||0)>0)?'No jobs have been verified recently. Refresh the configured sources or review their status.':state.dashboardFreshness==='24h'?'No recent jobs found. Try the 7-day filter or refresh sources.':'No verified openings match the selected date range and profile.';
+ const savedCount=state.applications.filter(application=>String(application.status||'').toUpperCase()==='SHORTLISTED').length;
+ const tracked=state.applications.filter(application=>!['SHORTLISTED','DISCOVERED','NOT_COMPLETED_YET'].includes(String(application.status||'').toUpperCase()));
  const activeCount=tracked.filter(application=>!['DECLINED','REJECTED','WITHDRAWN','SUBMISSION_FAILED'].includes(String(application.status||'').toUpperCase())).length;
  const groups=[
   {label:'Applied',color:'#2678ff',statuses:['SUBMITTED','APPLIED']},
@@ -444,8 +551,11 @@ function renderDashboard() {
   const rateLimited=/rate limit|once per hour/i.test(source.error||'');
   const status=rateLimited?'Rate Limited':source.error?'Error':!source.enabled?'Disabled':healthy?'Connected':'Enabled';
   const statusClass=source.error?(rateLimited?'source-warning':'source-bad'):healthy?'source-good':'source-idle';
-  const lastSync=source.lastSuccessfulSync?new Date(source.lastSuccessfulSync).toLocaleString():source.enabled?'No successful sync':'Not synced';
-  return `<div class="mini-source-row"><span class="source-indicator ${statusClass}" aria-label="${esc(status)}"></span><div><strong>${esc(source.source||'Job source')}</strong><small>${esc(source.error||lastSync)}</small></div><span class="source-state ${source.error?(rateLimited?'state-warning':'state-error'):healthy?'state-good':'state-muted'}">${esc(status)}</span></div>`;
+  const lastSync=source.lastSuccessfulSync?`Last success ${new Date(source.lastSuccessfulSync).toLocaleString()}`:source.enabled?'No successful sync':'Not synced';
+  const lastAttempt=source.lastAttempt?` · Attempt ${new Date(source.lastAttempt).toLocaleString()}`:'';
+  const counts=source.fetched!==undefined?` · ${Number(source.fetched)} fetched, ${Number(source.verifiedJobs||0)} verified open`:'';
+  const detail=[source.error?`Error: ${source.error}`:lastSync,`${lastAttempt}${counts}`].filter(Boolean).join(' · ');
+  return `<div class="mini-source-row"><span class="source-indicator ${statusClass}" aria-label="${esc(status)}"></span><div><strong>${esc(source.source||'Job source')}</strong><small>${esc(detail)}</small></div><span class="source-state ${source.error?(rateLimited?'state-warning':'state-error'):healthy?'state-good':'state-muted'}">${esc(status)}</span></div>`;
  }).join('');
  content.innerHTML=`
   <div class="dashboard-searchbar">
@@ -455,6 +565,7 @@ function renderDashboard() {
     <button class="button button-primary" type="submit">⌕ Search</button>
    </form>
    <div class="dashboard-controls">
+    <label class="dashboard-freshness-control">Date range <select id="dashboard-freshness"><option value="24h" ${state.dashboardFreshness==='24h'?'selected':''}>Last 24 hours</option><option value="7d" ${state.dashboardFreshness==='7d'?'selected':''}>Last 7 days</option><option value="older" ${state.dashboardFreshness==='older'?'selected':''}>Older than 7 days</option><option value="all" ${state.dashboardFreshness==='all'?'selected':''}>All posting dates</option></select></label>
     <button class="button button-primary dashboard-sync-button" id="dashboard-sync-jobs" type="button">↻ Refresh jobs</button>
     <button class="icon-button dashboard-notifications" id="dashboard-notifications" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path></svg></button>
     <button class="icon-button dashboard-theme" id="dashboard-theme" title="Toggle light theme" aria-label="Toggle light theme">☾</button>
@@ -462,18 +573,22 @@ function renderDashboard() {
    </div>
   </div>
   <div class="grid dashboard-stats">
-   <article class="card kpi-card kpi-jobs"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M8 17h32v23H8zM18 17v-4a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v4M8 26h32M20 26v4h8v-4"></path></svg></div><div class="kpi-content"><span class="stat-label">New Jobs</span><strong class="stat-value">${Number(state.stats.totalJobs||0)}</strong><span class="stat-foot">+${Number(state.stats.newIn24Hours||0)} in 24 hours</span></div><svg class="kpi-trend trend-blue" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
-   <article class="card kpi-card kpi-matches"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="22" cy="26" r="15"></circle><circle cx="22" cy="26" r="8"></circle><path d="M22 26l19-19M33 7h8v8M31 7v7h7"></path></svg></div><div class="kpi-content"><span class="stat-label">Strong Matches</span><strong class="stat-value">${state.jobs.filter(job=>stageAllows(job)&&Number(job.score??0)>=dashboardThreshold).length}</strong><span class="stat-foot">${dashboardThreshold}%+ match</span></div><svg class="kpi-trend trend-green" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
+   <article class="card kpi-card kpi-jobs"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M8 17h32v23H8zM18 17v-4a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v4M8 26h32M20 26v4h8v-4"></path></svg></div><div class="kpi-content"><span class="stat-label">Eligible Jobs</span><strong class="stat-value">${Number(state.stats.totalJobs||0)}</strong><span class="stat-foot">${esc(state.dashboardFreshness==='older'?'Older than 7 days':state.dashboardFreshness==='all'?'All posting dates':state.dashboardFreshness==='24h'?'Last 24 hours':'Last 7 days')} · ${Number(state.stats.newIn24Hours||0)} posted in 24h</span></div><svg class="kpi-trend trend-blue" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
+   <article class="card kpi-card kpi-matches"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="22" cy="26" r="15"></circle><circle cx="22" cy="26" r="8"></circle><path d="M22 26l19-19M33 7h8v8M31 7v7h7"></path></svg></div><div class="kpi-content"><span class="stat-label">Strong Matches</span><strong class="stat-value">${Number(state.stats.strongMatches||0)}</strong><span class="stat-foot">${Number(state.stats.strongMatches||0)===0?'No matches meet the selected threshold':`${dashboardThreshold}%+ of eligible jobs`}</span></div><svg class="kpi-trend trend-green" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
    <article class="card kpi-card kpi-saved"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M12 8h24v33L24 32 12 41z"></path></svg></div><div class="kpi-content"><span class="stat-label">Saved Jobs</span><strong class="stat-value">${savedCount}</strong><span class="stat-foot">In your shortlist</span></div><svg class="kpi-trend trend-purple" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
    <article class="card kpi-card kpi-applications"><div class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M13 7h16l8 8v26H13zM29 7v9h8M19 24h12M19 30h12M19 36h8"></path></svg></div><div class="kpi-content"><span class="stat-label">Applications</span><strong class="stat-value">${tracked.length}</strong><span class="stat-foot">${activeCount} active</span></div><svg class="kpi-trend trend-orange" viewBox="0 0 96 44" aria-hidden="true"><path d="M3 37c14-2 17-20 29-18s14 13 26 8 18-20 35-24"></path><circle cx="93" cy="3" r="3"></circle></svg></article>
   </div>
   <div class="dashboard-workspace">
    <section class="dashboard-center">
-    <div class="dashboard-section-title"><div><h2>Recommended for you</h2><p>Top matches based on your profile and preferences.</p></div><button class="text-button" data-go="jobs">View all jobs&nbsp; →</button></div>
-    ${recommendations.length?`<div class="job-grid dashboard-job-grid">${recommendations.map(jobRow).join('')}</div>`:`<div class="card dashboard-empty"><strong>No jobs available yet</strong><p>Jobs will appear here after sources provide listings.</p><button class="button button-primary" data-go="jobs">Discover jobs</button></div>`}
+    <div class="dashboard-section-title"><div><h2>Fresh openings for you</h2><p>Recently verified open jobs posted within the selected range and meeting your match threshold.</p></div><button class="text-button" data-go="jobs">View all jobs&nbsp; →</button></div>
+    ${recommendations.length?`<div class="job-grid dashboard-job-grid">${recommendations.map(jobRow).join('')}</div>`:`<div class="card dashboard-empty"><strong>${esc(emptyJobsMessage)}</strong><p>Unknown posting dates are labeled unverified, and only recently verified open jobs are recommended.</p><button class="button button-primary" data-go="jobs">Discover jobs</button></div>`}
    </section>
    <aside class="dashboard-right" aria-label="Dashboard summary">
-    <section class="card application-mini">
+     <section class="card autoapply-promo">
+      <div class="panel-heading"><div><h2>AutoApply workspace</h2><p>Review a saved job and prepare its official form.</p></div></div>
+      <button class="button button-primary" data-go="browser">Open AutoApply&nbsp; →</button>
+     </section>
+     <section class="card application-mini">
      <div class="panel-heading"><h2>Application Progress</h2><button class="text-button" data-go="applications">View all&nbsp; →</button></div>
      ${tracked.length?`<div class="donut-layout"><div class="donut-chart" role="img" aria-label="Application status chart, ${tracked.length} tracked applications"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="donut-track" cx="50" cy="50" r="39"></circle>${chartSegments}</svg><div class="donut-center"><strong>${tracked.length}</strong><span>Total</span></div></div><div class="donut-legend">${groups.map((group,index)=>`<div class="donut-legend-row"><span class="legend-dot legend-${index}"></span><span>${esc(group.label)}</span><strong>${group.count}</strong></div>`).join('')}</div></div><p class="chart-note">${chartTotal===0?'Progress categories appear as you update tracked application statuses.':''}</p>`:`<div class="chart-empty"><div class="donut-chart donut-zero"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="donut-track" cx="50" cy="50" r="39"></circle></svg><div class="donut-center"><strong>0</strong><span>Total</span></div></div><p>Application progress will appear after you track applications.</p></div>`}
     </section>
@@ -485,6 +600,7 @@ function renderDashboard() {
   </div>`;
  bindCommon();
  document.getElementById('dashboard-sync-jobs')?.addEventListener('click',event=>syncAllJobSources(event.currentTarget));
+ document.getElementById('dashboard-freshness')?.addEventListener('change',async event=>{state.dashboardFreshness=event.target.value;localStorage.setItem('menix-dashboard-freshness',state.dashboardFreshness);await render().catch(showError);});
  document.getElementById('dashboard-search-form')?.addEventListener('submit',event=>{
   event.preventDefault();
   state.query=document.getElementById('dashboard-query').value.trim();
@@ -525,14 +641,57 @@ function renderSaved(){
  bindCommon();
 }
 
-function renderSettings(){
- content.innerHTML=`<div class="card settings-card"><h2>Job matching preferences</h2><p class="muted small">Strong-match counts use the backend scoring service. Set your minimum score for the Strong Matches dashboard metric.</p><label class="settings-range" for="settings-min-score"><span>Minimum match score</span><strong id="settings-score-value">${state.minScore}%</strong><input id="settings-min-score" type="range" min="50" max="100" step="5" value="${state.minScore}"></label><div class="actions"><button class="button button-primary" id="save-settings">Save preferences</button></div><p class="footer-note">Your threshold is stored locally on this device. The backend remains the source of job match scores.</p></div>`;
+async function renderSettings(){
+ const [answers,preferences]=await Promise.all([api('/smart-apply/answers'),api('/smart-apply/preferences')]);
+ state.smartApplyAnswers=answers;
+ state.smartApplyPreferences=preferences;
+ const profile=state.profile||{};
+ const textField=(name,label,value,placeholder='')=>`<label class="field"><span>${label}</span><input name="${name}" value="${esc(value||'')}" placeholder="${esc(placeholder)}"></label>`;
+ const longField=(name,label,value)=>`<label class="field full"><span>${label}</span><textarea name="${name}" rows="3">${esc(value||'')}</textarea></label>`;
+ const answerRows=answers.map(item=>`<form class="smart-answer-row" data-memory-id="${item.id}"><label class="field"><span>Question</span><input name="question" value="${esc(item.question)}" required></label><label class="field full"><span>Approved answer</span><textarea name="answer" rows="3" required>${esc(item.answer)}</textarea></label><label class="field"><span>Category</span><input name="category" value="${esc(item.category)}"></label><div class="memory-meta">Source: ${esc(item.source)} · Approved ${esc(item.approvedAt?new Date(item.approvedAt).toLocaleDateString():'date unavailable')} · Used ${Number(item.usageCount||0)} time(s) · Corrections ${Number(item.correctionCount||0)}</div><label class="application-permission"><input name="excluded" type="checkbox" ${item.excluded?'checked':''}><span>Exclude this answer from matching</span></label><div class="actions"><button class="button button-primary" type="submit">Save answer</button><button class="button button-danger" type="button" data-delete-memory="${item.id}">Delete</button></div></form>`).join('');
+ content.innerHTML=`<div class="card settings-card"><h2>Candidate Smart Apply Memory</h2><p class="muted small">Facts here are user-provided and stored in your local Menix database. Legal, work authorization and salary answers are never auto-filled; you must explicitly confirm sensitive answers.</p><form id="smart-profile-form"><div class="form-grid">${textField('fullName','Candidate name',profile.fullName)}${textField('email','Email',profile.email)}${textField('phone','Phone',profile.phone)}${textField('currentLocation','Current location',profile.currentLocation)}${textField('degree','Degree / qualification',profile.degree)}${textField('graduationYear','Graduation year',profile.graduationYear)}${textField('linkedinUrl','LinkedIn URL',profile.linkedinUrl)}${textField('githubUrl','GitHub URL',profile.githubUrl)}${textField('portfolioUrl','Portfolio URL',profile.portfolioUrl)}${textField('noticePeriod','Notice period',profile.noticePeriod)}${textField('minimumSalary','Salary expectation (optional)',profile.minimumSalary)}${textField('workAuthorization','Work authorization answer (explicitly supplied)',profile.workAuthorization)}${textField('sponsorshipAnswer','Sponsorship answer (explicitly supplied)',profile.sponsorshipAnswer)}${longField('education','Education',profile.education)}${longField('skills','Skills',profile.skills)}${longField('experience','Work experience / internships',profile.experience)}${longField('projects','Projects',profile.projects)}</div><div class="actions"><button class="button button-primary" type="submit">Save candidate profile</button></div></form></div><div class="card settings-card"><h2>Answer reuse preferences</h2><p class="muted small">Approved answer learning uses deterministic question matching only; no model is trained. Automatic reuse is off by default.</p><form id="smart-preferences-form"><label class="application-permission"><input name="automaticReuseApprovedAnswers" type="checkbox" ${preferences.automaticReuseApprovedAnswers?'checked':''}><span>Automatically reuse high-confidence, previously approved answers on non-sensitive fields</span></label><label class="application-permission"><input name="learningEnabled" type="checkbox" ${preferences.learningEnabled?'checked':''}><span>Allow saving answers I explicitly approve</span></label><div class="form-grid"><label class="field"><span>High-confidence threshold (0.50–1.00)</span><input name="highConfidenceThreshold" type="number" min="0.5" max="1" step="0.01" value="${preferences.highConfidenceThreshold}"></label><label class="field"><span>Medium-confidence threshold (0.50–1.00)</span><input name="mediumConfidenceThreshold" type="number" min="0.5" max="1" step="0.01" value="${preferences.mediumConfidenceThreshold}"></label></div><div class="actions"><button class="button button-primary" type="submit">Save reuse settings</button></div></form></div><div class="card settings-card"><div class="section-head"><div><h2>Approved answer library</h2><p class="muted small">${answers.length} saved answer(s). Excluded entries stay visible here but are not matched.</p></div><button type="button" class="button button-danger" id="clear-answer-memory" ${answers.length?'':'disabled'}>Delete all answer history</button></div><form id="new-smart-answer" class="smart-answer-row"><label class="field"><span>Question</span><input name="question" required maxlength="1000" placeholder="What technologies have you used?"></label><label class="field full"><span>Your approved answer</span><textarea name="answer" rows="3" required maxlength="8000" placeholder="Enter only accurate information you approve for reuse"></textarea></label><label class="field"><span>Category</span><input name="category" value="General" maxlength="80"></label><div class="actions"><button class="button button-primary" type="submit">Save approved answer</button></div></form>${answerRows||'<div class="empty">No approved answers saved. Add a response you want to reuse, or approve an answer from the form review panel.</div>'}</div><div class="card settings-card"><h2>Job matching preferences</h2><p class="muted small">Strong-match counts use the backend scoring service. Set your minimum score for the Strong Matches dashboard metric.</p><label class="settings-range" for="settings-min-score"><span>Minimum match score</span><strong id="settings-score-value">${state.minScore}%</strong><input id="settings-min-score" type="range" min="50" max="100" step="5" value="${state.minScore}"></label><div class="actions"><button class="button button-primary" id="save-settings">Save preferences</button></div><p class="footer-note">Your threshold is stored locally on this device. The backend remains the source of job match scores.</p></div>`;
  document.getElementById('settings-min-score').addEventListener('input',event=>{document.getElementById('settings-score-value').textContent=`${event.target.value}%`;});
  document.getElementById('save-settings').addEventListener('click',async()=>{
   state.minScore=Number(document.getElementById('settings-min-score').value);
   localStorage.setItem('menix-min-score',String(state.minScore));
   toast('Matching preferences saved');
   go('dashboard');
+ });
+ document.getElementById('smart-profile-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  try{state.profile=await api('/profile',{method:'PUT',body:JSON.stringify({...profile,...Object.fromEntries(new FormData(event.currentTarget))})});toast('Candidate profile saved.');}
+  catch(error){toast(`Could not save candidate profile: ${error.message}`);}
+ });
+ document.getElementById('smart-preferences-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const data=Object.fromEntries(new FormData(event.currentTarget));
+  data.automaticReuseApprovedAnswers=event.currentTarget.elements.automaticReuseApprovedAnswers.checked;
+  data.learningEnabled=event.currentTarget.elements.learningEnabled.checked;
+  data.highConfidenceThreshold=Number(data.highConfidenceThreshold);
+  data.mediumConfidenceThreshold=Number(data.mediumConfidenceThreshold);
+  try{state.smartApplyPreferences=await api('/smart-apply/preferences',{method:'PUT',body:JSON.stringify(data)});toast('Smart Apply reuse settings saved.');}
+  catch(error){toast(`Could not save Smart Apply settings: ${error.message}`);}
+ });
+ document.getElementById('new-smart-answer').addEventListener('submit',async event=>{
+  event.preventDefault();
+  try{await api('/smart-apply/answers',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))});toast('Approved answer saved.');await renderSettings();}
+  catch(error){toast(`Could not save answer: ${error.message}`);}
+ });
+ document.querySelectorAll('.smart-answer-row[data-memory-id]').forEach(form=>form.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const item=Object.fromEntries(new FormData(form));item.excluded=form.elements.excluded.checked;
+  try{await api(`/smart-apply/answers/${form.dataset.memoryId}`,{method:'PUT',body:JSON.stringify(item)});toast('Approved answer updated.');await renderSettings();}
+  catch(error){toast(`Could not update answer: ${error.message}`);}
+ }));
+ document.querySelectorAll('[data-delete-memory]').forEach(button=>button.addEventListener('click',async()=>{
+  if(!window.confirm('Delete this approved answer from memory?'))return;
+  try{await api(`/smart-apply/answers/${button.dataset.deleteMemory}`,{method:'DELETE'});toast('Saved answer deleted.');await renderSettings();}
+  catch(error){toast(`Could not delete answer: ${error.message}`);}
+ }));
+ document.getElementById('clear-answer-memory').addEventListener('click',async()=>{
+  if(!window.confirm('Permanently delete all approved answer history? Candidate profile facts will remain unchanged.'))return;
+  try{await api('/smart-apply/answers',{method:'DELETE'});state.smartApplyAnswers=[];toast('Approved answer history deleted.');await renderSettings();}
+  catch(error){toast(`Could not clear answer history: ${error.message}`);}
  });
 }
 
@@ -556,7 +715,7 @@ async function toggleSavedJob(id,button){
 }
 
 async function renderSources(){
- let manual=[];try{[manual,state.portalCapabilities]=await Promise.all([api('/sources/manual'),api('/portal-capabilities')])}catch(e){throw new Error(`Sources registry could not load: ${e.message}`)}
+ let manual=[],sourceStatus;try{[manual,state.portalCapabilities,sourceStatus]=await Promise.all([api('/sources/manual'),api('/portal-capabilities'),api('/sources')]);state.sources=sourceStatus.sources||[]}catch(e){throw new Error(`Sources registry could not load: ${e.message}`)}
  const builtins=state.sources||[];
  const providers=[
   {name:'Remotive',type:'Public API/feed',url:'https://remotive.com/remote-jobs',notes:'Public listings may be delayed; retain required attribution and follow current API terms.',rate:'Use conservative refreshes; honor provider limits and caching guidance.'},
@@ -569,20 +728,23 @@ async function renderSources(){
   {name:'Indeed',type:'Official search fallback',url:'https://www.indeed.com/',notes:'External job-search link only in this build; no inbox or application API is connected.',rate:'Follow Indeed terms and account restrictions.'}
  ];
  content.innerHTML=`<div class="source-hero card"><div><div class="eyebrow">DISCOVERY CONNECTORS</div><h2>One place for every job source</h2><p class="muted">Connect feeds and APIs, save career pages manually, test URLs, and see exactly what is configured. Suggested sources below are a catalog, not verified connections.</p></div><div class="source-metrics"><div><strong>${builtins.filter(x=>x.enabled).length}</strong><span>Built-in enabled</span></div><div><strong>${manual.length}</strong><span>Manual sources</span></div><div><strong>${builtins.filter(x=>x.error).length+manual.filter(x=>x.connectionStatus==='ERROR').length}</strong><span>Reported errors</span></div></div></div>
+ <div class="card spaced-card"><div class="section-head section-head-compact"><div><h2>Existing job data</h2><p class="muted small">Reconciliation labels legacy, invalid, and overdue records without deleting jobs, saved items, or application history. Duplicate candidates are reported for review.</p></div><button class="button" id="reconcile-job-data">Reconcile job data</button></div><div id="reconcile-result" class="muted small"></div></div>
  <div class="card spaced-card"><div class="section-head section-head-compact"><div><h2>Add a source manually</h2><p class="muted small">Paste a public HTTPS feed, API endpoint, company careers page, or portal search URL. Menix tests reachability and gives an advisory format guess; it will not assume every URL is importable.</p></div></div>
  <form id="source-add-form"><div class="form-grid"><div class="field"><label for="source-name">Display name (optional)</label><input id="source-name" name="name" placeholder="e.g. Acme Careers"></div><div class="field"><label for="source-type">Source type</label><select id="source-type" name="type"><option value="CAREER_SITE">Company career page</option><option value="JSON_FEED">JSON API / feed</option><option value="RSS_FEED">RSS / Atom feed</option><option value="JOB_BOARD">Job board search page</option><option value="EMPLOYER_BOARD">Employer ATS board</option></select></div><div class="field full"><label for="source-url">HTTPS URL</label><input id="source-url" name="url" type="url" placeholder="https://careers.example.com/jobs" required></div><div class="field"><label for="source-terms">Terms / permissions notes</label><textarea id="source-terms" name="termsNotes">Verify provider terms and permissions before enabling automated retrieval.</textarea></div><div class="field"><label for="source-rate">Rate-limit notes</label><textarea id="source-rate" name="rateLimitNotes">Honor provider rate limits, HTTP 429, and Retry-After.</textarea></div></div><div class="actions"><button class="button button-primary" type="submit">＋ Add source</button><button class="button" type="button" id="source-discover">Discover supported source types</button></div><div id="source-add-result" class="muted small"></div></form></div>
  <div class="section-head spaced-card"><div><h2>Saved manual sources</h2><p class="muted small">Persistent local records. Test a source before treating it as ready.</p></div><button class="button" id="source-refresh">Refresh list</button></div>
  ${manual.length?`<div class="source-cards">${manual.map(s=>`<article class="source-card card" data-source-id="${s.id}"><div class="source-card-head"><div class="source-logo">${esc((s.name||'S').slice(0,1).toUpperCase())}</div><div class="source-card-title"><strong>${esc(s.name)}</strong><small>${esc(s.sourceUrl)}</small></div><span class="tag ${s.connectionStatus==='REACHABLE'?'good':s.connectionStatus==='ERROR'?'warn':''}">${esc(s.connectionStatus||'NOT_TESTED')}</span></div><div class="source-badges"><span class="tag">${esc(s.sourceType)}</span><span class="tag">${esc(s.detectedFormat||'UNKNOWN')}</span><span class="tag ${s.enabled?'good':''}">${s.enabled?'Enabled':'Paused'}</span></div><div class="source-notes"><p><b>Terms:</b> ${esc(s.termsNotes||'Not specified')}</p><p><b>Rate limits:</b> ${esc(s.rateLimitNotes||'Not specified')}</p></div><div class="source-sync"><span>Last test: ${esc(s.lastTestAt||'Never tested')}</span><span>Last sync: ${esc(s.lastSyncAt||'Not synced')}</span></div>${s.lastError?`<div class="source-error"><b>Diagnostic</b><p>${esc(s.lastError)}</p></div>`:''}<div class="actions"><button class="button button-primary" data-source-test="${s.id}">Test connection</button><button class="button" data-source-toggle="${s.id}" data-enabled="${s.enabled}">${s.enabled?'Disable':'Enable'}</button><button class="button button-danger" data-source-delete="${s.id}">Remove</button><a class="button button-quiet" href="${esc(s.sourceUrl)}" target="_blank" rel="noreferrer">Open site ↗</a></div><div class="source-test-result" id="source-test-${s.id}" aria-live="polite"></div></article>`).join('')}</div>`:'<div class="card empty">No manual sources saved yet. Add a public feed or career URL above. Your saved entries will appear here.</div>'}
  <div class="section-head spaced-card"><div><h2>Provider catalog</h2><p class="muted small">Reference options only. “Add manually” saves a URL; it does not grant private API access.</p></div><button class="button" data-go="capabilities">Portal capabilities</button></div>
- <div class="provider-catalog">${providers.map(p=>{const current=builtins.find(s=>s.source===p.name);const capability=state.portalCapabilities.find(item=>item.portal===p.name);const status=capability?.connectionState==='CONNECTED'?'Connected':capability?.error?'Error':capability?.connectionState==='NOT_TESTED'?'Enabled · not verified':current?.enabled?'Enabled · not verified':capability?'External link only':'Not connected';return `<article class="provider-card card"><div class="provider-top"><div class="source-logo">${esc(p.name.slice(0,1))}</div><div><strong>${esc(p.name)}</strong><small>${esc(p.type)}</small></div><span class="tag ${capability?.connectionState==='CONNECTED'?'good':capability?.error?'warn':''}">${esc(status)}</span></div><p>${esc(p.notes)}</p>${capability?.lastSuccessfulSync?`<p class="muted small">Last successful sync: ${esc(capability.lastSuccessfulSync)}</p>`:''}${capability?.error?`<p class="source-error"><b>Latest provider error</b><br>${esc(capability.error)}</p>`:''}<p class="muted small"><b>Rate guidance:</b> ${esc(p.rate)}</p><div class="actions"><button class="button" data-catalog-add="${esc(p.name)}" data-catalog-url="${esc(p.url)}" data-catalog-type="${p.name==='LinkedIn'||p.name==='Naukri'||p.name==='Indeed'?'JOB_BOARD':p.name==='Greenhouse'||p.name==='Lever'?'EMPLOYER_BOARD':'JSON_FEED'}">Save URL / setup note</button>${['LinkedIn','Naukri','Indeed'].includes(p.name)?`<button class="button button-quiet" data-open-provider="${esc(p.url)}">Open search site ↗</button>`:''}</div></article>`}).join('')}</div>
+ <div class="provider-catalog">${providers.map(p=>{const current=builtins.find(s=>s.source===p.name);const capability=state.portalCapabilities.find(item=>item.portal===p.name);const status=capability?.connectionState==='CONNECTED'?'Connected':capability?.error?'Error':capability?.connectionState==='NOT_TESTED'?'Enabled · not verified':current?.enabled?'Enabled · not verified':capability?'External link only':'Not connected';return `<article class="provider-card card"><div class="provider-top"><div class="source-logo">${esc(p.name.slice(0,1))}</div><div><strong>${esc(p.name)}</strong><small>${esc(p.type)}</small></div><span class="tag ${capability?.connectionState==='CONNECTED'?'good':capability?.error?'warn':''}">${esc(status)}</span></div><p>${esc(p.notes)}</p>${capability?.lastAttempt?`<p class="muted small">Last attempt: ${esc(capability.lastAttempt)}</p>`:''}${capability?.lastSuccessfulSync?`<p class="muted small">Last successful sync: ${esc(capability.lastSuccessfulSync)}</p>`:''}${capability?.fetched!==undefined?`<p class="muted small">${Number(capability.fetched)} fetched · ${Number(capability.imported||0)} imported · ${Number(capability.updated||0)} updated · ${Number(capability.rejected||0)} rejected · ${Number(capability.deduplicated||0)} duplicates · ${Number(capability.verifiedJobs||0)} currently verified open</p>`:''}${capability?.error?`<p class="source-error"><b>Latest provider error</b><br>${esc(capability.error)}</p>`:''}<p class="muted small"><b>Rate guidance:</b> ${esc(p.rate)}</p><div class="actions">${current?.enabled?`<button class="button" data-sync-provider="${esc(p.name)}">Retry sync</button>`:''}<button class="button" data-catalog-add="${esc(p.name)}" data-catalog-url="${esc(p.url)}" data-catalog-type="${p.name==='LinkedIn'||p.name==='Naukri'||p.name==='Indeed'?'JOB_BOARD':p.name==='Greenhouse'||p.name==='Lever'?'EMPLOYER_BOARD':'JSON_FEED'}">Save URL / setup note</button>${['LinkedIn','Naukri','Indeed'].includes(p.name)?`<button class="button button-quiet" data-open-provider="${esc(p.url)}">Open search site ↗</button>`:''}</div></article>`}).join('')}</div>
  <div class="notice spaced-card"><strong>Safety and support:</strong> Connection test checks HTTPS reachability and content hints. It does not prove that automated collection is allowed, validate an API schema fully, or import jobs. Private-network URLs are blocked. For unsupported sites, use the official external-search fallback.</div>`;
  document.getElementById('source-add-form').onsubmit=async e=>{e.preventDefault();const form=Object.fromEntries(new FormData(e.currentTarget));const out=document.getElementById('source-add-result');out.textContent='Saving source…';try{const created=await api('/sources/manual',{method:'POST',body:JSON.stringify(form)});out.textContent=`Saved ${created.name}. Test the connection before enabling any automated retrieval.`;toast('Source saved');await renderSources();}catch(err){out.textContent=err.message;toast('Could not add source')}};
  document.getElementById('source-discover').onclick=()=>{document.getElementById('source-type').focus();toast('Choose a source type, then paste its public URL. Detection is advisory.');};
  document.getElementById('source-refresh').onclick=()=>renderSources().catch(e=>toast(e.message));
+ document.getElementById('reconcile-job-data').onclick=async event=>{if(!confirm('Mark unverified, stale, and invalid listings? No jobs or application history will be deleted.'))return;const button=event.currentTarget;button.disabled=true;try{const result=await api('/jobs/reconcile',{method:'POST'});document.getElementById('reconcile-result').textContent=`Examined ${result.recordsExamined}; marked ${result.markedUnverified} unverified, ${result.markedStale} stale, ${result.markedInvalid} invalid; found ${result.duplicateRecords} duplicate candidates. Preserved ${result.savedRecordsPreserved} saved records and ${result.applicationRecordsPreserved} application records; deleted ${result.deletedRecords}.`;toast('Job reconciliation completed');await renderSources();}catch(error){document.getElementById('reconcile-result').textContent=`Reconciliation failed: ${error.message}`;}finally{button.disabled=false;}};
  content.querySelectorAll('[data-source-test]').forEach(btn=>btn.onclick=async()=>{const id=btn.dataset.sourceTest;const out=document.getElementById(`source-test-${id}`);out.textContent='Testing HTTPS reachability and detecting content type…';btn.disabled=true;try{const r=await api(`/sources/manual/${id}/test`,{method:'POST'});out.innerHTML=`<div class="${r.ok?'source-success':'source-error'}"><b>${r.ok?'Reachable':'Test failed'} · ${esc(r.detectedFormat||'Unknown')}</b><p>${esc(r.message||'')}</p>${r.statusCode?`<small>HTTP ${r.statusCode} · ${esc(r.contentType||'')}</small>`:''}</div>`;await renderSources();}catch(e){out.textContent=e.message}finally{btn.disabled=false}});
  content.querySelectorAll('[data-source-toggle]').forEach(btn=>btn.onclick=async()=>{try{await api(`/sources/manual/${btn.dataset.sourceToggle}`,{method:'PUT',body:JSON.stringify({enabled:btn.dataset.enabled!=='true'})});toast('Source setting saved');await renderSources()}catch(e){toast(e.message)}});
  content.querySelectorAll('[data-source-delete]').forEach(btn=>btn.onclick=async()=>{if(!confirm('Remove this saved source? Existing imported jobs will remain.'))return;try{await api(`/sources/manual/${btn.dataset.sourceDelete}`,{method:'DELETE'});toast('Source removed');await renderSources()}catch(e){toast(e.message)}});
  content.querySelectorAll('[data-catalog-add]').forEach(btn=>btn.onclick=()=>{document.getElementById('source-name').value=btn.dataset.catalogAdd;document.getElementById('source-url').value=btn.dataset.catalogUrl;document.getElementById('source-type').value=btn.dataset.catalogType;document.getElementById('source-url').scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('source-url').focus();});
+ content.querySelectorAll('[data-sync-provider]').forEach(btn=>btn.onclick=async()=>{btn.disabled=true;try{const result=await api(`/jobs/sync/${encodeURIComponent(btn.dataset.syncProvider)}`,{method:'POST'});toast(result.error?`${btn.dataset.syncProvider} sync failed: ${result.error}`:`${btn.dataset.syncProvider} sync completed; ${Number(result.imported||0)} imported, ${Number(result.updated||0)} updated.`);await renderSources();}catch(error){toast(`Could not sync ${btn.dataset.syncProvider}: ${error.message}`)}finally{btn.disabled=false}});
  content.querySelectorAll('[data-open-provider]').forEach(btn=>btn.onclick=()=>{const a=document.createElement('a');a.href=btn.dataset.openProvider;a.target='_blank';a.rel='noreferrer';a.click()});
 }
 
@@ -730,13 +892,10 @@ async function applyToJob(id,button){
   try{parsed=new URL(String(applicationUrl||''));}catch{throw new Error('This job does not have a valid application link.');}
   if(parsed.protocol!=='https:')throw new Error('This job does not have a secure HTTPS application link.');
   const existing=state.applications.find(application=>Number(application.jobId)===Number(id));
-  if(existing&&existing.status==='SUBMITTED'){toast('This job is already marked submitted.');return;}
-  if(existing&&!['SHORTLISTED','DISCOVERED'].includes(existing.status)){toast('This job is already in your application tracker. Update it there to avoid a duplicate application.');return;}
-  const record=await api(`/jobs/${id}/apply`,{method:'POST'});
-  if(record.status==='SUBMITTED'){toast('This job is already marked submitted.');return;}
-  toast('Application workflow started. Review all details and submit on the employer site yourself.');
-  await startApplication(applicationUrl,detail.title,detail.company);
-  await render();
+  if(existing&&String(existing.status||'').toUpperCase()==='SUBMITTED'){toast('This job is already marked submitted.');return;}
+  if(existing&&!['SHORTLISTED','DISCOVERED','WITHDRAWN','NOT_COMPLETED_YET'].includes(String(existing.status||'').toUpperCase())){toast('This job is already in your application tracker. Update it there to avoid a duplicate application.');return;}
+  const opened=await startBrowserAssistantApplication({...detail,applyUrl:applicationUrl});
+  if(opened)toast('Application opened in AutoApply. Review every answer; submission requires your confirmation.');
  }
  finally{if(button)button.disabled=false;}
 }
@@ -756,84 +915,401 @@ async function showJobDetail(id){
  const j=await api(`/jobs/${id}`);const m=await api(`/jobs/${id}/match`);const area=document.getElementById('job-detail');if(!area)throw new Error('The job description view is not available.');
  const missing=(m.missingSkills||[]), required=String(j.requiredSkills||'').trim();
  const direct=String(j.applyUrl||'').startsWith('https://')&&j.applyUrl!==j.url;
- area.innerHTML=`<div class="card job-detail"><div class="detail-top"><div><div class="eyebrow">YOUR MATCH</div><h2>${esc(j.title)}</h2><div class="muted">${esc(j.company)} ? ${esc(j.location||'Location not specified')} ? ${esc(j.source||'Manual listing')}</div></div><div><div class="score score-large">${m.score}%</div><div class="tag ${m.score>=80?'good':''}">${m.score>=80?'Strong match':m.score>=60?'Good potential':'Needs review'}</div></div></div><progress class="match-progress" max="100" value="${Math.max(0, Math.min(100, Number(m.score) || 0))}" aria-label="Match score ${m.score}%">${m.score}%</progress><div class="muted small">${esc(m.explanation)}</div><div class="section-head"><h2>Matching skills</h2></div>${(m.matchedSkills||[]).map(s=>`<span class="tag good">${esc(s)}</span>`).join('')||'<span class="muted small">No matching skills listed.</span>'}<div class="section-head"><h2>Skills to check</h2></div>${missing.map(s=>`<span class="tag warn">${esc(s)}</span>`).join('')||(required?'<span class="muted small">No gaps found in the listed skills.</span>':'<span class="muted small">This listing does not specify required skills.</span>')}<div class="section-head"><h2>Source job description</h2></div><p class="job-description">${esc(j.description||'No description supplied.')}</p><div class="actions">${j.url||j.applyUrl?`<button class="button button-primary" id="open-job">Apply &amp; open employer form</button>${j.url?'<button class="button" id="view-source">Open original listing</button>':''}`:''}<button class="button" id="draft-job">Draft cover letter</button>${state.aiStatus.enabled?'<button class="button" id="ai-match">AI analyze fit</button>':''}</div>${state.aiStatus.enabled?`<div class="footer-note">Optional Gemini analysis (${esc(state.aiStatus.model)}). It sends the job description and a minimized profile containing skills, target roles, experience level, and preferred locations after you confirm. Name, contact details, and resume are not sent.</div>`:'<div class="footer-note">Gemini analysis is disabled. Set GEMINI_API_KEY in the backend environment to enable optional AI matching.</div>'}<div id="ai-match-area"></div><div id="draft-area"></div><div class="footer-note">Deterministic match estimate is shown by default. AI analysis is optional and cached for the current job and profile.</div></div>`;
+ area.innerHTML=`<div class="card job-detail"><div class="detail-top"><div><div class="eyebrow">YOUR MATCH</div><h2>${esc(j.title)}</h2><div class="muted">${esc(j.company)} ? ${esc(j.location||'Location not specified')} ? ${esc(j.source||'Manual listing')}</div></div><div><div class="score score-large">${m.score}%</div><div class="tag ${m.score>=80?'good':''}">${m.score>=80?'Strong match':m.score>=60?'Good potential':'Needs review'}</div></div></div><progress class="match-progress" max="100" value="${Math.max(0, Math.min(100, Number(m.score) || 0))}" aria-label="Match score ${m.score}%">${m.score}%</progress><div class="muted small">${esc(m.explanation)}</div><div class="section-head"><h2>Matching skills</h2></div>${(m.matchedSkills||[]).map(s=>`<span class="tag good">${esc(s)}</span>`).join('')||'<span class="muted small">No matching skills listed.</span>'}<div class="section-head"><h2>Skills to check</h2></div>${missing.map(s=>`<span class="tag warn">${esc(s)}</span>`).join('')||(required?'<span class="muted small">No gaps found in the listed skills.</span>':'<span class="muted small">This listing does not specify required skills.</span>')}<div class="section-head"><h2>Source job description</h2></div><p class="job-description">${esc(j.description||'No description supplied.')}</p><div class="actions">${j.url||j.applyUrl?`<button class="button button-primary" id="open-job">Apply with AutoApply</button>${j.url?'<button class="button" id="view-source">Open original listing</button>':''}`:''}<button class="button" id="draft-job">Draft cover letter</button>${state.aiStatus.enabled?'<button class="button" id="ai-match">AI analyze fit</button>':''}</div>${state.aiStatus.enabled?`<div class="footer-note">Optional Gemini analysis (${esc(state.aiStatus.model)}). It sends the job description and a minimized profile containing skills, target roles, experience level, and preferred locations after you confirm. Name, contact details, and resume are not sent.</div>`:'<div class="footer-note">Gemini analysis is disabled. Set GEMINI_API_KEY in the backend environment to enable optional AI matching.</div>'}<div id="ai-match-area"></div><div id="draft-area"></div><div class="footer-note">Deterministic match estimate is shown by default. AI analysis is optional and cached for the current job and profile.</div></div>`;
  document.getElementById('ai-match')?.addEventListener('click',async event=>{if(!window.confirm('Send this job description and your minimized skills, target roles, experience level, and preferred locations to Google Gemini for matching? Your name, contact details, and resume are not sent.'))return;const button=event.currentTarget,box=document.getElementById('ai-match-area');button.disabled=true;box.innerHTML='<p class="muted">Gemini is analyzing job fit…</p>';try{const r=await api(`/jobs/${id}/ai-match`,{method:'POST',body:JSON.stringify({consent:true})});box.innerHTML=`<div class="notice"><strong>Combined match: ${r.score}%</strong> <span class="muted small">(Gemini ${r.aiScore}% · deterministic ${r.deterministicScore}%)${r.cached?' · cached':''}</span><p>${esc(r.combinedExplanation)}</p><strong>Matched skills</strong><div>${(r.matchedSkills||[]).map(s=>`<span class="tag good">${esc(s)}</span>`).join('')||'<span class="muted small">None identified</span>'}</div><strong>Missing required skills</strong><div>${(r.missingRequiredSkills||[]).map(s=>`<span class="tag warn">${esc(s)}</span>`).join('')||'<span class="muted small">None identified</span>'}</div><p>Seniority: ${esc(r.seniorityCompatibility)} · Geographic eligibility: ${esc(r.geographicEligibility)}</p><p>${esc(r.workAuthorizationUncertainty)}</p>${(r.warnings||[]).map(w=>`<p class="muted small">${esc(w)}</p>`).join('')}<div class="muted small">Recommendation: ${esc(r.recommendation)} · ${r.cached?'Cached analysis':'Analysis saved for this job and profile'}</div></div>`;toast('AI match saved');}catch(e){box.innerHTML=`<div class="notice"><strong>AI analysis unavailable</strong><p>${esc(e.message)} Deterministic match remains available.</p></div>`;}finally{button.disabled=false;}});
  document.getElementById('draft-job').onclick=async()=>{const box=document.getElementById('draft-area');box.innerHTML='<p class="muted">Preparing draft...</p>';try{const d=await api('/drafts/cover-letter',{method:'POST',body:JSON.stringify({jobId:id})});box.innerHTML=`<div class="field cover-letter-field"><label>Editable cover-letter draft ? review before use</label><textarea id="draft-text" class="cover-letter-textarea">${esc(d.text)}</textarea></div><div class="actions"><button class="button" id="copy-draft">Select draft text</button></div>`;document.getElementById('copy-draft').onclick=()=>{document.getElementById('draft-text').select();toast('Draft selected ? copy with Ctrl+C');};}catch(e){box.innerHTML=`<p class="error">${esc(e.message)}</p>`}};
  document.getElementById('open-job')?.addEventListener('click',()=>applyToJob(id,document.getElementById('open-job')).catch(e=>toast(e.message)));document.getElementById('view-source')?.addEventListener('click',()=>openTrustedExternal(j.url).catch(e=>toast(e.message)));
 }
-function fillApplicationTab(view, showMessage=true){
- const profile=state.profile||{};
- const script=`(()=>{const p=${JSON.stringify(profile)};const fields=[...document.querySelectorAll('input,textarea')].filter(e=>!e.disabled&&!e.readOnly&&!e.value&&e.getClientRects().length&&(e.tagName==='TEXTAREA'||['text','email','tel','url'].includes((e.type||'text').toLowerCase())));let filled=0;for(const e of fields){const l=[e.name,e.id,e.placeholder,e.getAttribute('aria-label'),e.autocomplete,...(e.labels?[...e.labels].map(x=>x.textContent):[])].join(' ').toLowerCase();let k=/email|e-mail/.test(l)?'email':/phone|mobile|telephone/.test(l)?'phone':/full.?name|your name|candidate name/.test(l)?'fullName':/linkedin/.test(l)?'linkedinUrl':/github/.test(l)?'githubUrl':/portfolio|personal website|website url/.test(l)?'portfolioUrl':/skill|technology|tech stack/.test(l)?'skills':/education|degree|university|college/.test(l)?'education':/project/.test(l)?'projects':/experience|work history|employment history/.test(l)?'experience':/city|location|country/.test(l)?'preferredLocations':null;if(!k||!p[k])continue;const proto=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(!setter)continue;setter.call(e,p[k]);e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));filled++;}return {filled};})()`;
- return view.executeJavaScript(script).then(result=>{if(showMessage&&result.filled)toast(`${result.filled} blank profile fields filled. Review the answers before submitting.`);return result;}).catch(()=>({filled:0}));
+function setApplicationAssistStatus(message){
+ const status=document.getElementById('application-assist-status');
+ if(status)status.textContent=message;
 }
-function activateApplicationTab(id){
- state.activeApplicationTab=id;
- document.querySelectorAll('.application-tab').forEach(button=>button.classList.toggle('active',button.dataset.tabId===id));
- document.querySelectorAll('.application-webview').forEach(view=>view.classList.toggle('active',view.dataset.tabId===id));
+
+function activeApplicationTab(){
+ return state.page==='browser'?state.browserAssistant.autoApplyTab:null;
 }
-function closeApplication(){document.querySelector('.application-overlay')?.remove();document.body.classList.remove('application-open');state.applicationTabs=[];state.activeApplicationTab=null;}
-async function startApplication(rawUrl, jobTitle='this job', company='the employer') {
- let parsed;try{parsed=new URL(String(rawUrl||''));}catch{toast('This job does not have a valid application link.');return;}
- if(parsed.protocol!=='https:'){toast('This job does not have a secure application link.');return;}
- let resumes=[];try{resumes=await api('/resumes')}catch(error){toast(`Saved resume list could not load: ${error.message}`)}
- let box=document.querySelector('.application-overlay');
- if(!box){
-  box=document.createElement('div');box.className='application-overlay';document.body.classList.add('application-open');
-  const selectedResume=localStorage.getItem('menix-selected-resume')||'';
-  box.innerHTML=`<div class="application-shell"><div class="application-toolbar"><div><strong id="application-heading">Applying</strong><small>Review the employer form and submit it yourself. Use the profile helper only with your consent; resume files must be attached manually on the employer site.</small></div><div class="actions"><select id="application-resume" class="button" aria-label="Select a saved resume"><option value="">${resumes.length?'Select a saved resume':'No saved resumes'}</option>${resumes.map(resume=>`<option value="${esc(resume.storageName)}" ${selectedResume===resume.storageName?'selected':''}>${esc(resume.filename)}</option>`).join('')}</select><button class="button" id="download-application-resume" ${resumes.length?'':'disabled'}>Download resume</button><select id="add-application-tab" class="button" aria-label="Open another job board"><option value="">+ Open search tab</option><option>Indeed</option><option>Naukri</option><option>LinkedIn</option><option>Company careers</option></select><button class="button" id="fill-application-tab">Fill profile</button><button class="button" id="close-application-window">Back to Menix</button></div></div><div class="application-tabbar" role="tablist"></div><div class="application-panes"></div></div>`;
-  document.body.append(box);
-  box.querySelector('#close-application-window').onclick=closeApplication;
-  box.querySelector('#application-resume').addEventListener('change',event=>localStorage.setItem('menix-selected-resume',event.target.value));
-  box.querySelector('#download-application-resume').addEventListener('click',()=>downloadSelectedResume().catch(error=>toast(error.message)));
-  box.querySelector('#add-application-tab').onchange=e=>{const platform=e.target.value;if(platform){e.target.value='';openBoardSearch(platform).catch(error=>toast(`Could not open ${platform}: ${error.message}`));}};
-  box.querySelector('#fill-application-tab').onclick=async()=>{const tab=state.applicationTabs.find(item=>item.id===state.activeApplicationTab);if(!tab)return;let host='this website';try{host=new URL(tab.view.getURL()).hostname;}catch{}if(host==='linkedin.com'||host.endsWith('.linkedin.com')){toast('Profile autofill is disabled on LinkedIn. Use the official site manually.');return}if(!window.confirm(`Send matching saved profile details to ${host}? Only blank, recognized fields will be filled. Review the form and submit it yourself.`))return;const result=await fillApplicationTab(tab.view,false);toast(result.filled?`${result.filled} fields filled on ${host}. Review before submitting.`:'No matching blank fields were found.');};
+function setAutoApplyStatus(tab,status,message){
+ if(tab)tab.status=status;
+ state.autoApply.status=status;
+ setApplicationAssistStatus(message||status);
+ const badge=document.getElementById('application-status-badge');
+ if(badge)badge.textContent=status;
+ if(tab?.sessionId){
+  const backendStatus=status.toUpperCase().replace(/\s+/g,'_');
+  const diagnostic=status==='Failed'?String(message||'').slice(0,1000):'';
+  const detected=tab.fields?.length||0;
+  const filled=tab.fieldsFilled||0;
+  tab.sessionUpdate=(tab.sessionUpdate||Promise.resolve()).then(()=>api(`/autofill/sessions/${tab.sessionId}`,{
+   method:'PUT',body:JSON.stringify({status:backendStatus,fieldsDetected:detected,fieldsFilled:filled,diagnostic})
+  })).catch(error=>{toast(`AutoApply status could not be saved: ${error.message}`);});
  }
- async function downloadSelectedResume(){
-  const storageName=document.querySelector('#application-resume')?.value;
-  if(!storageName){toast('Choose a saved resume first.');return}
-  const response=await fetch(`${API_BASE}/resumes/${encodeURIComponent(storageName)}`);
-  if(!response.ok)throw new Error(`Resume download failed (${response.status}).`);
-  const blob=await response.blob();
-  const url=URL.createObjectURL(blob);
-  const anchor=document.createElement('a');
-  anchor.href=url;
-  anchor.download=storageName.substring(37);
-  anchor.click();
-  setTimeout(()=>URL.revokeObjectURL(url),1000);
-  toast('Resume downloaded. Attach it manually on the employer site.');
- }
- const id=`app-tab-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
- const tab={id,label:`${company} ? ${jobTitle}`,url:parsed.href,view:null};state.applicationTabs.push(tab);
- const button=document.createElement('button');button.className='application-tab';button.dataset.tabId=id;button.title=tab.label;button.innerHTML=`<span>${esc(tab.label)}</span><b aria-label="Close tab">?</b>`;
- button.addEventListener('click',e=>{if(e.target.closest('b')){const index=state.applicationTabs.findIndex(t=>t.id===id);tab.view.remove();button.remove();state.applicationTabs.splice(index,1);if(state.activeApplicationTab===id){const next=state.applicationTabs[Math.max(0,index-1)];if(next)activateApplicationTab(next.id);else closeApplication();}}else activateApplicationTab(id);});
- box.querySelector('.application-tabbar').append(button);
- const view=document.createElement('webview');view.className='application-webview';view.dataset.tabId=id;view.setAttribute('partition','persist:menix-application-sessions');view.setAttribute('allowpopups','');tab.view=view;box.querySelector('.application-panes').append(view);
- view.addEventListener('will-navigate',event=>{try{if(new URL(event.url).protocol!=='https:')event.preventDefault();}catch{event.preventDefault();}});
- view.addEventListener('new-window',event=>{if(String(event.url).startsWith('https://'))view.loadURL(event.url);});
- activateApplicationTab(id);document.getElementById('application-heading').textContent=`Applying to ${jobTitle}`;
- view.src=parsed.href;
 }
+function applicationQuestion(field){
+ return [field.label,field.context].filter(Boolean).join(' — ').trim()||field.name||'Unlabeled question';
+}
+function applicationProposal(field){
+ const profileMapping=window.MenixAutofillEngine.mapField(field,state.profile||{});
+ const memory=window.MenixSmartApplyMemory.matchQuestion(applicationQuestion(field),state.smartApplyAnswers,state.smartApplyPreferences);
+ if(field.sensitive){
+  const label=`${field.label||''} ${field.context||''}`;
+  const profile=state.profile||{};
+  const salaryExpectation=/\b(expected|expectation|desired|minimum|target)\b/i.test(label)&&!/\b(history|previous|past|current)\b/i.test(label)&&/salary|compensation/i.test(label);
+  const sensitiveProfileValue=salaryExpectation?profile.minimumSalary:/sponsor/i.test(label)?profile.sponsorshipAnswer:/work authorization|authorized to work|visa/i.test(label)?profile.workAuthorization:'';
+  if(sensitiveProfileValue)return {value:sensitiveProfileValue,source:'Profile',confidence:1,status:'confirmation-required',reason:'Explicitly saved sensitive fact; confirm its accuracy before applying it.'};
+  if(memory.answer)return {value:memory.answer,source:memory.source,confidence:memory.confidence,memoryId:memory.memoryId,status:'confirmation-required',reason:memory.reason};
+  return {value:'',source:'Manual',confidence:0,status:'confirmation-required',reason:'Sensitive or legally significant question must be answered and confirmed by you.'};
+ }
+ if(memory.status==='conflict')return {value:'',source:memory.source,confidence:memory.confidence,status:'conflict',reason:memory.reason};
+ if(memory.answer&&memory.confidence>profileMapping.confidence)return {value:memory.answer,source:memory.source,confidence:memory.confidence,memoryId:memory.memoryId,status:memory.status,reason:memory.reason};
+ if(profileMapping.status==='mapped'&&profileMapping.confidence<Number(state.smartApplyPreferences.mediumConfidenceThreshold||0.55))return {value:'',source:'',confidence:profileMapping.confidence,status:'blank',reason:'Profile match confidence is below the configured suggestion threshold; answer manually or add an exact approved answer.'};
+ if(profileMapping.status==='mapped')return {value:profileMapping.value,source:'Profile',confidence:profileMapping.confidence,status:profileMapping.confidence>=state.smartApplyPreferences.highConfidenceThreshold?'profile-match':'suggestion',reason:profileMapping.reason};
+ if(memory.answer)return {value:memory.answer,source:memory.source,confidence:memory.confidence,memoryId:memory.memoryId,status:memory.status,reason:memory.reason};
+ if(memory.status==='confirmation-required')return {value:'',source:'Manual',confidence:0,status:'confirmation-required',reason:memory.reason};
+ if(profileMapping.reason)return {value:'',source:'',confidence:Math.max(profileMapping.confidence||0,memory.confidence||0),status:profileMapping.status,reason:[profileMapping.reason,memory.reason].filter(Boolean).join(' ')};
+ return {value:'',source:'',confidence:0,status:memory.status,reason:memory.reason};
+}
+function renderAutoApplyInspection(tab,scan){
+ const panel=document.getElementById('application-field-review');
+ if(!panel)return;
+ if(scan.blocked){
+  tab.reviewed=false;
+  tab.fields=[];
+  tab.requiredMissing=0;
+  tab.validationIssues=0;
+  tab.submitCandidates=[];
+  const submit=document.getElementById('application-submit-button');
+  if(submit)submit.disabled=true;
+  panel.innerHTML=`<div class="notice"><strong>Manual action required</strong><p>${esc(scan.reason)}</p></div>`;
+  return;
+ }
+ const fields=(scan.fields||[]).map(field=>{
+  const proposal=applicationProposal(field);
+  if(tab.dismissedSuggestions?.has(field.signature)||tab.rejectedSuggestions?.has(field.signature)){
+   proposal.value='';proposal.source='';proposal.status='blank';proposal.reason='This suggestion was cleared or rejected for the current form.';
+  }
+  return {...field,proposal};
+ });
+ const unsupported=scan.unsupported||[];
+ const uploads=scan.uploads||[];
+ const requiredMissing=fields.filter(field=>field.required&&field.blank).length+unsupported.filter(field=>field.required).length+uploads.filter(field=>field.required&&field.blank).length;
+ const validationIssues=fields.filter(field=>field.invalid).length+uploads.filter(field=>field.invalid).length;
+ const requiredFields=[...fields,...unsupported,...uploads].filter(field=>field.required);
+ const requiredCompleted=fields.filter(field=>field.required&&!field.blank&&!field.invalid).length+uploads.filter(field=>field.required&&!field.blank&&!field.invalid).length;
+ const progress=requiredFields.length?Math.round(requiredCompleted/requiredFields.length*100):0;
+ const eligibleSubmit=(scan.submitCandidates||[]).filter(candidate=>/\b(submit|apply now|send application)\b/i.test(candidate.label));
+ tab.fields=fields;
+ tab.unsupported=unsupported;
+ tab.uploads=uploads;
+ tab.submitCandidates=eligibleSubmit;
+ tab.reviewed=false;
+ tab.requiredMissing=requiredMissing;
+ tab.validationIssues=validationIssues;
+ tab.scanBlocked=false;
+ const rows=fields.map(field=>{
+  const proposal=field.proposal;
+  const wasAutoFilled=tab.autofilledSignatures?.has(field.signature);
+  const status=field.invalid?'Invalid':!field.blank?(wasAutoFilled?'Autofilled':'Answered'):field.sensitive?(proposal.value?'Needs confirmation':'Manual — sensitive'):field.aiSuggestion||proposal.value?'Suggested':field.required?'Blank — required':'Blank — optional';
+  const reason=field.invalid?'The current value fails the employer control’s validation.':!field.blank?'The employer form currently contains a value.':field.sensitive?'Sensitive or legally significant questions must be answered and confirmed by you.':proposal.reason;
+  const proposalValue=field.aiSuggestion||proposal.value||'';
+  const savedOrigin=tab.answerOrigins?.get(field.signature);
+  const originMatches=!field.blank&&savedOrigin&&String(savedOrigin.value)===String(field.value);
+  const source=!field.blank?(originMatches?savedOrigin.source:'Manual'):field.aiSuggestion?'AI Suggested':proposal.source;
+  const confidence=!field.blank?(originMatches?`${Math.round(savedOrigin.confidence*100)}%`:'Not measured'):field.aiSuggestion?'Not measured':`${Math.round((proposal.confidence||0)*100)}%`;
+  const canSuggest=field.blank&&!field.invalid;
+  const currentAnswer=!field.blank?`<p class="small"><strong>Current answer:</strong> ${esc(field.value)}</p>`:'';
+  return `<article class="autofill-field-row ${field.required&&field.blank?'is-required-blank':''} ${field.invalid?'is-invalid':''}"><div class="autofill-field-heading"><strong>${esc(applicationQuestion(field))}${field.required?' <b>Required</b>':''}</strong><span class="answer-state">${esc(status)}</span></div><small>${esc(field.type)} · Source: ${esc(source||'None')} · Confidence: ${esc(confidence)}</small>${currentAnswer}${reason?`<p class="muted small">${esc(reason)}</p>`:''}${canSuggest?`<textarea data-answer-value="${esc(field.id)}" rows="2" aria-label="Proposed answer for ${esc(applicationQuestion(field))}" placeholder="${field.required?'Required answer is still blank. Review or enter a truthful answer.':'Optional answer; leave blank if not applicable.'}">${esc(proposalValue)}</textarea><label class="small memory-approval"><input type="checkbox" data-answer-save="${esc(field.id)}" ${state.smartApplyPreferences.learningEnabled?'checked':''} ${state.smartApplyPreferences.learningEnabled?'':'disabled'}> Save this approved answer to Smart Apply Memory</label><div class="autofill-field-actions"><button type="button" class="button" data-answer-accept="${esc(field.id)}">Use &amp; approve</button><button type="button" class="button button-quiet" data-answer-reject="${esc(field.id)}">Reject suggestion</button></div>`:''}</article>`;
+ }).join('');
+ const unsupportedRows=unsupported.map(field=>`<article class="autofill-field-row is-unsupported"><div class="autofill-field-heading"><strong>${esc(field.label||'Unlabeled custom control')}${field.required?' <b>Required</b>':''}</strong><span class="answer-state">Unsupported</span></div><small>${esc(field.type)} · ${esc(field.reason)}</small></article>`).join('');
+ const uploadRows=uploads.map(upload=>`<article class="autofill-field-row"><div class="autofill-field-heading"><strong>${esc(upload.label||'File upload')}${upload.required?' <b>Required</b>':''}</strong><span class="answer-state">${upload.invalid?'Invalid':upload.blank?'Blank — file required':'Answered'}</span></div><small>File upload · Source: Manual · Confidence: Not measured</small><p class="muted small">${upload.blank?'Choose the file yourself through the employer’s native file chooser. Menix never selects or uploads it automatically.':'A file is selected in the employer form; verify that it is the intended document.'}</p></article>`).join('');
+ const resumeUploads=tab.uploads.filter(upload=>/\b(resume|cv|curriculum vitae)\b/i.test(`${upload.label} ${upload.accept}`));
+ tab.resumeUploadCandidates=resumeUploads;
+ const uploadMessage=resumeUploads.length===1?'A resume upload control was identified. Choose the file using the employer’s native picker.':tab.uploads.length?'File controls were detected, but Menix could not identify a unique resume control. Use the employer page manually.':'No visible resume upload control detected on this page.';
+ panel.innerHTML=`<div class="autoapply-scan-summary"><div class="autoapply-progress-heading"><strong>Application Progress</strong><span>${progress}%</span></div><div class="autoapply-progress-track" role="progressbar" aria-label="Required application fields completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><span>${requiredCompleted} of ${requiredFields.length} required fields completed · ${requiredMissing} remaining · ${validationIssues} validation warning${validationIssues===1?'':'s'} · ${eligibleSubmit.length} recognizable submit control${eligibleSubmit.length===1?'':'s'}</span><small>${fields.length} supported controls · ${unsupported.length} unsupported</small></div><div class="autofill-list">${rows||'<p class="muted">No supported form controls found. Complete the page manually or continue to the next step and scan again.</p>'}${uploadRows}${unsupportedRows}</div><p class="muted small">${esc(uploadMessage)}${tab.policy?.notice?` ${esc(tab.policy.notice)}`:''}</p>${scan.inaccessibleFrames?'<p class="muted small">Some cross-origin frames could not be inspected; complete those fields manually.</p>':''}${scan.submitCandidates?.length>eligibleSubmit.length?'<p class="muted small">A submit-like control could not be identified confidently. Use the employer page manually.</p>':''}`;
+ const submit=document.getElementById('application-submit-button');
+ if(submit)submit.disabled=true;
+ const upload=document.getElementById('application-upload-resume');
+ if(upload)upload.disabled=resumeUploads.length!==1;
+ panel.querySelectorAll('[data-answer-accept]').forEach(button=>button.addEventListener('click',()=>acceptAutoApplyAnswer(tab,button.dataset.answerAccept)));
+ panel.querySelectorAll('[data-answer-reject]').forEach(button=>button.addEventListener('click',()=>rejectAutoApplyAnswer(tab,button.dataset.answerReject)));
+}
+function answerCategory(question){
+ const value=String(question||'').toLowerCase();
+ if(/education|degree|graduat|university|college/.test(value))return 'Education';
+ if(/skill|technology|programming/.test(value))return 'Skills';
+ if(/project/.test(value))return 'Projects';
+ if(/experience|employment|internship|work history/.test(value))return 'Experience';
+ if(/salary|compensation|notice period|availability/.test(value))return 'Employment';
+ if(/location|city|country/.test(value))return 'Location';
+ if(/email|phone|name|linkedin|github|portfolio/.test(value))return 'Contact';
+ return 'General';
+}
+function clearAutoApplySuggestions(tab){
+ if(!tab)return;
+ for(const field of tab.fields||[])delete field.aiSuggestion;
+ tab.dismissedSuggestions=new Set((tab.fields||[]).filter(field=>field.blank).map(field=>field.signature));
+ renderAutoApplyInspection(tab,{blocked:false,fields:tab.fields||[],unsupported:tab.unsupported||[],uploads:tab.uploads||[],submitCandidates:tab.submitCandidates||[]});
+ setApplicationAssistStatus('Current suggestions cleared. Saved profile and approved memory remain unchanged.');
+}
+function rejectAutoApplyAnswer(tab,id){
+ const field=tab?.fields?.find(item=>item.id===id);
+ if(!field)return;
+ (tab.rejectedSuggestions ||= new Set()).add(field.signature);
+ delete field.aiSuggestion;
+ renderAutoApplyInspection(tab,{blocked:false,fields:tab.fields||[],unsupported:tab.unsupported||[],uploads:tab.uploads||[],submitCandidates:tab.submitCandidates||[]});
+ setApplicationAssistStatus('Suggestion rejected for this form. It was not saved to memory.');
+}
+async function acceptAutoApplyAnswer(tab,id){
+ const field=tab?.fields?.find(item=>item.id===id);
+ const editor=document.querySelector(`[data-answer-value="${CSS.escape(id)}"]`);
+ if(!field||!editor)return;
+ const rawValue=editor.value.trim();
+ if(!rawValue){toast('Enter a truthful answer or leave the field blank.');return;}
+ if(!document.getElementById('application-site-permission')?.checked){toast('Confirm the employer permits assisted form interaction before using a suggestion.');return;}
+ if(field.sensitive&&!window.confirm('This is a sensitive or legally significant question. Confirm that this answer is accurate and explicitly approved by you before using it.'))return;
+ try{
+  const fresh=await tab.view.executeJavaScript(window.MenixAutofillEngine.scanScript());
+  if(fresh.blocked)throw new Error(fresh.reason);
+  const match=(fresh.fields||[]).find(item=>item.signature===field.signature);
+  if(!match||!match.blank)throw new Error('The employer field changed or already has a value. Rescan before continuing.');
+  const checkboxValue=field.type==='checkbox'?rawValue.toLowerCase()==='true'||rawValue.toLowerCase()==='yes':rawValue;
+  if(field.type==='checkbox'&&!checkboxValue)throw new Error('A checkbox suggestion must match a saved skill; complete this control manually.');
+  const result=await tab.view.executeJavaScript(window.MenixAutofillEngine.fillScript([{id:match.id,value:checkboxValue}]));
+  if(!result?.filled)throw new Error('The answer could not be applied. Complete the field manually.');
+  tab.autofilledSignatures ||= new Set();
+  tab.autofilledSignatures.add(field.signature);
+  tab.answerOrigins ||= new Map();
+  tab.answerOrigins.set(field.signature,{value:checkboxValue,source:field.aiSuggestion?'AI Suggested':field.proposal?.source||'Manual',confidence:field.proposal?.confidence||0});
+  const remember=document.querySelector(`[data-answer-save="${CSS.escape(id)}"]`)?.checked&&state.smartApplyPreferences.learningEnabled;
+  if(remember){
+   const payload={question:applicationQuestion(field),answer:rawValue,category:answerCategory(applicationQuestion(field)),source:field.aiSuggestion?'AI Suggested':field.proposal?.source||'Manual'};
+   const saved=field.proposal?.memoryId?await api(`/smart-apply/answers/${field.proposal.memoryId}`,{method:'PUT',body:JSON.stringify({...payload,excluded:false})}):await api('/smart-apply/answers',{method:'POST',body:JSON.stringify(payload)});
+   if(!state.smartApplyAnswers.some(item=>item.id===saved.id))state.smartApplyAnswers.push(saved);
+   else state.smartApplyAnswers=state.smartApplyAnswers.map(item=>item.id===saved.id?saved:item);
+  }
+  const memoryId=field.proposal?.memoryId;
+  if(memoryId)await api(`/smart-apply/answers/${memoryId}/used`,{method:'POST'}).catch(error=>toast(`Answer used; memory usage could not be recorded: ${error.message}`));
+  await scanAutoApplyPage(tab);
+  setApplicationAssistStatus(remember?'Answer used and saved as approved memory.':'Answer used after your approval; it was not added to memory.');
+ }catch(error){toast(error.message);setApplicationAssistStatus(error.message);}
+}
+async function suggestMissingAnswers(){
+ const tab=activeApplicationTab();
+ if(!tab?.view){toast('Open an application page and detect its fields first.');return;}
+ try{
+  const scan=await scanAutoApplyPage(tab);
+  if(scan.blocked){setAutoApplyStatus(tab,'Failed',scan.reason);return;}
+  const eligible=(scan.fields||[]).filter(field=>field.blank&&!field.sensitive&&field.label&&!applicationProposal(field).value&&field.type!=='checkbox');
+  if(!eligible.length){setApplicationAssistStatus('No eligible unanswered questions need an AI draft. Sensitive and unsupported questions remain manual.');return;}
+  if(!state.aiStatus.enabled){setApplicationAssistStatus('AI suggestions are unavailable because Gemini is not configured. Deterministic profile and approved-answer matching remain available.');return;}
+  const resumeName=document.getElementById('application-resume')?.value;
+  if(!resumeName){setApplicationAssistStatus('Select a saved resume before requesting an AI draft. Resume text may contain personal information.');return;}
+  if(!window.confirm('Send the selected resume text, relevant saved job details, and these non-sensitive unanswered questions to the configured Gemini provider? Drafts remain suggestions and will not be filled automatically.'))return;
+  const requestFields=eligible.slice(0,80).map(field=>({id:field.id,type:field.type,label:field.label,name:field.name,context:field.context,placeholder:field.placeholder,required:field.required,maxLength:field.maxLength,options:field.options}));
+  const drafts=await api('/resumes/application-draft',{method:'POST',body:JSON.stringify({storageName:resumeName,jobId:tab.jobId,consent:true,fields:requestFields})});
+  const current=await tab.view.executeJavaScript(window.MenixAutofillEngine.scanScript());
+  if(current.blocked)throw new Error(current.reason);
+  const draftById=new Map((drafts||[]).map(item=>[item.id,String(item.value||'').trim()]));
+  for(const field of current.fields||[]){
+   const original=eligible.find(item=>item.signature===field.signature);
+   const suggestion=original&&draftById.get(original.id);
+   if(field.blank&&!field.sensitive&&suggestion)field.aiSuggestion=suggestion;
+  }
+  setApplicationAssistStatus(`${draftById.size} AI draft(s) returned. Review each answer; none were filled automatically.`);
+  renderAutoApplyInspection(tab,current);
+ }catch(error){setApplicationAssistStatus(`AI suggestions failed: ${error.message}`);toast(`AI suggestions failed: ${error.message}`);}
+}
+async function scanAutoApplyPage(tab){
+ if(!tab?.view)throw new Error('Open an application page first.');
+ const policy=window.MenixAutofillEngine.classifyUrl(tab.view.getURL());
+ if(!policy.allowed)throw new Error(policy.reason);
+ const scan=await tab.view.executeJavaScript(window.MenixAutofillEngine.scanScript());
+ tab.policy=policy;
+ tab.scanBlocked=Boolean(scan.blocked);
+ renderAutoApplyInspection(tab,scan);
+ return scan;
+}
+async function inspectAutoApplyForm(){
+ const tab=activeApplicationTab();
+ setAutoApplyStatus(tab,'Detecting Fields','Detecting visible form fields…');
+ try{
+  const scan=await scanAutoApplyPage(tab);
+  if(scan.blocked){setAutoApplyStatus(tab,'Failed',scan.reason);return;}
+  const remaining=scan.fields.filter(field=>field.required&&field.blank).length+(scan.unsupported||[]).filter(field=>field.required).length+(scan.uploads||[]).filter(field=>field.required&&field.blank).length;
+  const warnings=scan.fields.filter(field=>field.invalid).length+(scan.uploads||[]).filter(field=>field.invalid).length;
+  setAutoApplyStatus(tab,'Needs Review',`${scan.fields.length} supported and ${(scan.unsupported||[]).length} unsupported controls detected; ${remaining} required fields remain, with ${warnings} validation warning(s).`);
+ }catch(error){setAutoApplyStatus(tab,'Failed',`Field detection failed: ${error.message}`);toast(error.message);}
+}
+async function fillAutoApplyForm(){
+ const tab=activeApplicationTab();
+ if(!tab?.jobId){toast('Open a saved job application first.');return;}
+ if(!document.getElementById('application-site-permission')?.checked){
+  toast('Confirm that the employer permits assisted autofill before filling fields.');
+  return;
+ }
+ setAutoApplyStatus(tab,'Autofilling','Checking page permissions and detecting blank supported fields…');
+ try{
+  const policy=window.MenixAutofillEngine.classifyUrl(tab.view.getURL());
+  if(!policy.allowed)throw new Error(policy.reason);
+  const scan=await scanAutoApplyPage(tab);
+  if(scan.blocked){setAutoApplyStatus(tab,'Failed',scan.reason);return;}
+  const preferences=state.smartApplyPreferences;
+  const answers=[];
+  const reusableMemoryIds=[];
+  for(const field of scan.fields||[]){
+   if(!field.blank||field.sensitive)continue;
+   if(tab.dismissedSuggestions?.has(field.signature)||tab.rejectedSuggestions?.has(field.signature))continue;
+   const proposal=applicationProposal(field);
+   if(proposal.source==='Profile'&&proposal.value&&proposal.confidence>=Number(preferences.highConfidenceThreshold||0.85)){
+    answers.push({id:field.id,value:proposal.value,signature:field.signature,source:'Profile',confidence:proposal.confidence});
+   }else if(proposal.source==='Previously Approved'&&proposal.value&&preferences.automaticReuseApprovedAnswers&&proposal.status==='approved-match'&&proposal.confidence>=Number(preferences.highConfidenceThreshold||0.85)){
+    answers.push({id:field.id,value:proposal.value,signature:field.signature,source:'Previously Approved',confidence:proposal.confidence,memoryId:proposal.memoryId});
+    reusableMemoryIds.push(proposal.memoryId);
+   }
+  }
+  if(!answers.length){
+   const requiredMissing=scan.fields.filter(field=>field.required&&field.blank).length+(scan.unsupported||[]).filter(field=>field.required).length+(scan.uploads||[]).filter(field=>field.required&&field.blank).length;
+   setAutoApplyStatus(tab,'Needs Review',`No approved high-confidence answers are eligible for automatic reuse. ${requiredMissing} required field(s) remain; review suggestions or answer manually.`);
+   return;
+  }
+  const current=await tab.view.executeJavaScript(window.MenixAutofillEngine.scanScript());
+  if(current.blocked){setAutoApplyStatus(tab,'Failed',current.reason);return;}
+  const currentBySignature=new Map((current.fields||[]).map(field=>[field.signature,field]));
+  const safeValues=[];
+  for(const answer of answers){
+   const field=currentBySignature.get(answer.signature);
+   if(field?.blank&&!field.sensitive)safeValues.push({id:field.id,value:answer.value,signature:answer.signature,source:answer.source,confidence:answer.confidence});
+  }
+  if(!safeValues.length){
+   await scanAutoApplyPage(tab);
+   setAutoApplyStatus(tab,'Needs Review','The form changed; no answers were filled. Review the rescan results.');
+   return;
+  }
+  setAutoApplyStatus(tab,'Autofilling',`Applying ${safeValues.length} approved high-confidence profile or memory answer(s)…`);
+  const result=await tab.view.executeJavaScript(window.MenixAutofillEngine.fillScript(safeValues));
+  tab.autofilledSignatures ||= new Set();
+  tab.answerOrigins ||= new Map();
+  for(const answer of safeValues){
+   tab.autofilledSignatures.add(answer.signature);
+   tab.answerOrigins.set(answer.signature,{value:answer.value,source:answer.source,confidence:answer.confidence});
+  }
+  for(const id of reusableMemoryIds){
+   try{await api(`/smart-apply/answers/${id}/used`,{method:'POST'});}
+   catch(error){toast(`Answer filled, but memory usage could not be recorded: ${error.message}`);}
+  }
+  const after=await scanAutoApplyPage(tab);
+  const filled=Number(result?.filled||0);
+  tab.fieldsFilled=filled;
+  const missing=after.fields.filter(field=>field.required&&field.blank).length+(after.unsupported||[]).filter(field=>field.required).length;
+  setAutoApplyStatus(tab,'Needs Review',`${filled} approved answers filled. ${missing} required field(s) remain; review every value and validation warning before proceeding.`);
+ }catch(error){setAutoApplyStatus(tab,'Failed',`Autofill failed: ${error.message}`);toast(`Autofill failed: ${error.message}`);}
+}
+async function reviewAutoApplyForm(){
+ const tab=activeApplicationTab();
+ setAutoApplyStatus(tab,'Needs Review','Rechecking the current form and required fields…');
+ try{
+  const scan=await scanAutoApplyPage(tab);
+  if(scan.blocked){setAutoApplyStatus(tab,'Failed',scan.reason);return;}
+  const requiredMissing=scan.fields.filter(field=>field.required&&field.blank).length+(scan.unsupported||[]).filter(field=>field.required).length+(scan.uploads||[]).filter(field=>field.required&&field.blank).length;
+  const validationIssues=scan.fields.filter(field=>field.invalid).length+(scan.uploads||[]).filter(field=>field.invalid).length;
+  const candidates=(scan.submitCandidates||[]).filter(candidate=>/\b(submit|apply now|send application)\b/i.test(candidate.label));
+  tab.reviewed=requiredMissing===0&&validationIssues===0;
+  const submit=document.getElementById('application-submit-button');
+  const maySubmit=window.MenixAutofillEngine.canSubmit({
+   reviewed:tab.reviewed,permissionConfirmed:Boolean(document.getElementById('application-site-permission')?.checked),
+   requiredMissing,validationIssues,unsupportedCount:(scan.unsupported||[]).length,submitCandidateCount:candidates.length,blocked:scan.blocked
+  }).allowed;
+  if(submit)submit.disabled=!maySubmit;
+  setAutoApplyStatus(tab,'Needs Review',maySubmit
+   ?'Review complete. Required controls are filled and one submit control was identified; submission still requires your confirmation.'
+   :`${requiredMissing} required fields remain, ${validationIssues} validation warnings, or no unique submit control was identified. Complete unsupported controls on the employer page, then rescan and review again.`);
+ }catch(error){setAutoApplyStatus(tab,'Failed',`Form review failed: ${error.message}`);toast(error.message);}
+}
+async function uploadAutoApplyResume(){
+ const tab=activeApplicationTab();
+ if(!tab?.uploads?.length){toast('No visible file-upload control was detected.');return;}
+ if(!document.getElementById('application-site-permission')?.checked){toast('Confirm the employer permits assisted form interaction first.');return;}
+ const upload=tab.resumeUploadCandidates?.length===1?tab.resumeUploadCandidates[0]:null;
+ if(!upload){toast('No unique resume upload control could be identified. Use the employer page manually.');return;}
+ if(!window.confirm('Open the employer’s native file chooser for this detected resume field? Menix will not select a file; choose the resume yourself.')){
+  return;
+ }
+ try{
+  const result=await tab.view.executeJavaScript(window.MenixAutofillEngine.clickUploadScript(upload.id),true);
+  if(!result.opened)throw new Error(result.reason||'The upload control is unavailable.');
+  setAutoApplyStatus(tab,'Needs Review','Choose the intended resume in the employer’s native file chooser, then review the page.');
+ }catch(error){setAutoApplyStatus(tab,'Failed',`Resume chooser failed: ${error.message}`);toast(error.message);}
+}
+async function submitAutoApplyForm(){
+ const tab=activeApplicationTab();
+ if(!tab?.jobId||!tab.applicationId){toast('Start this saved job in AutoApply before submitting.');return;}
+ const permissionConfirmed=Boolean(document.getElementById('application-site-permission')?.checked);
+ const initialGate=window.MenixAutofillEngine.canSubmit({
+  reviewed:tab.reviewed,permissionConfirmed,requiredMissing:tab.requiredMissing,validationIssues:tab.validationIssues,
+  unsupportedCount:tab.unsupported?.length||0,submitCandidateCount:tab.submitCandidates?.length||0,blocked:tab.scanBlocked
+ });
+ if(!initialGate.allowed){toast(initialGate.reason);return;}
+ const fresh=await scanAutoApplyPage(tab).catch(error=>{setAutoApplyStatus(tab,'Failed',`Final form check failed: ${error.message}`);return null;});
+ if(!fresh||fresh.blocked){setAutoApplyStatus(tab,'Failed',fresh?.reason||'The current form cannot be safely checked.');return;}
+ const missing=fresh.fields.filter(field=>field.required&&field.blank).length+(fresh.unsupported||[]).filter(field=>field.required).length+(fresh.uploads||[]).filter(field=>field.required&&field.blank).length;
+ const validationIssues=fresh.fields.filter(field=>field.invalid).length+(fresh.uploads||[]).filter(field=>field.invalid).length;
+ const candidates=(fresh.submitCandidates||[]).filter(candidate=>/\b(submit|apply now|send application)\b/i.test(candidate.label));
+ const finalGate=window.MenixAutofillEngine.canSubmit({
+  reviewed:true,permissionConfirmed,requiredMissing:missing,validationIssues,unsupportedCount:(fresh.unsupported||[]).length,submitCandidateCount:candidates.length,blocked:fresh.blocked
+ });
+ if(!finalGate.allowed){tab.reviewed=false;setAutoApplyStatus(tab,'Needs Review',`The page changed since review. ${finalGate.reason}`);toast(finalGate.reason);return;}
+ tab.submitCandidates=candidates;
+ tab.requiredMissing=missing;
+ tab.validationIssues=validationIssues;
+ tab.reviewed=true;
+ let beforeVerification;
+ try{beforeVerification=await tab.view.executeJavaScript(window.MenixAutofillEngine.verifySubmissionScript());}
+ catch(error){setAutoApplyStatus(tab,'Failed',`The employer page could not be checked before submission: ${error.message}`);return;}
+ if(!window.confirm(`Submit this application to ${tab.company||'the employer'} now? Menix will click the single identified submit control and mark it submitted only if a confirmation is detected.`))return;
+ try{
+  const result=await tab.view.executeJavaScript(window.MenixAutofillEngine.clickSubmitScript(tab.submitCandidates[0].id),true);
+  if(!result.clicked)throw new Error(result.reason||'The application form could not be submitted.');
+  setAutoApplyStatus(tab,'Needs Review','Submission was attempted. Waiting for an employer confirmation…');
+  await new Promise(resolve=>setTimeout(resolve,1500));
+  const verification=await tab.view.executeJavaScript(window.MenixAutofillEngine.verifySubmissionScript());
+  const newConfirmation=verification.confirmed&&(!beforeVerification.confirmed||verification.location!==beforeVerification.location||verification.evidence!==beforeVerification.evidence);
+  if(!newConfirmation){
+   setAutoApplyStatus(tab,'Failed','Submission is not confirmed by the employer page. The tracker was not marked submitted; check the page or confirmation email.');
+   return;
+  }
+  const evidence=`Employer page confirmation: ${String(verification.evidence).slice(0,500)}`;
+  const saved=await api(`/applications/${tab.applicationId}`,{method:'PUT',body:JSON.stringify({status:'SUBMITTED',submissionEvidence:evidence})});
+  state.applications=[saved,...state.applications.filter(item=>item.id!==saved.id)];
+  setAutoApplyStatus(tab,'Submitted',`Employer confirmation detected (“${verification.evidence}”). Application history was updated.`);
+ }catch(error){setAutoApplyStatus(tab,'Failed',`Submission was not confirmed: ${error.message}. Check the employer page before retrying.`);toast(error.message);}
+}
+
 function applicationRow(a){
  const status=String(a.status||'NEEDS_ATTENTION');
  const statusClass=status==='SUBMITTED'?'status-applied':['INTERVIEW','OFFER'].includes(status)?'status-progress':status==='DECLINED'?'status-closed':'status-pending';
- return `<article class="application-card"><div class="application-card-top"><div class="company-icon">${esc(initials(a.company||'Company'))}</div><div class="application-title"><strong>${esc(a.jobTitle||'Untitled job')}</strong><span>${esc(a.company||'Company not specified')}</span></div><span class="application-status ${statusClass}">${esc(status.replaceAll('_',' '))}</span></div><div class="application-card-meta"><span>Updated ${esc((a.updatedAt||'').slice(0,10)||'Date unavailable')}</span>${a.appliedAt?`<span>Applied ${esc(a.appliedAt)}</span>`:''}</div>${a.notes?`<p class="application-card-notes">${esc(a.notes)}</p>`:''}<div class="application-card-actions">${a.status==='DECLINED'?`<button class="button button-primary" data-restore-job="${a.jobId}">Restore to jobs</button>`:`<button class="button button-primary" data-app-edit="${a.id}">Update status</button>`}</div></article>`;
+ const displayStatus=status==='NOT_COMPLETED_YET'?'Not Completed Yet':status.replaceAll('_',' ');
+ return `<article class="application-card" data-application-card="${a.id}"><div class="application-card-top"><div class="company-icon">${esc(initials(a.company||'Company'))}</div><div class="application-title"><strong>${esc(a.jobTitle||'Untitled job')}</strong><span>${esc(a.company||'Company not specified')}</span></div><span class="application-status ${statusClass}">${esc(displayStatus)}</span></div><div class="application-card-meta"><span>Updated ${esc((a.updatedAt||'').slice(0,10)||'Date unavailable')}</span>${a.appliedAt?`<span>Applied ${esc(a.appliedAt)}</span>`:''}</div>${a.notes?`<p class="application-card-notes">${esc(a.notes)}</p>`:''}<div class="application-card-actions">${a.status==='DECLINED'?`<button class="button button-primary" data-restore-job="${a.jobId}">Restore to jobs</button>`:`<button class="button button-primary" data-app-edit="${a.id}">Update status</button>`}</div><div class="application-edit-slot" data-app-edit-slot="${a.id}"></div></article>`;
 }
 function renderApplications(){
- const active=state.applications.filter(a=>!['DECLINED','SHORTLISTED','DISCOVERED'].includes(a.status)),declined=state.applications.filter(a=>a.status==='DECLINED');
- content.innerHTML=`<section class="applications-page"><div class="applications-page-heading"><div><span class="eyebrow">YOUR JOB SEARCH</span><h2>Applied Jobs</h2><p class="muted small">Track each application and update its status when you receive a confirmed response.</p></div><div class="application-summary"><strong>${active.length}</strong><span>Active applications</span></div></div><section class="application-section"><div class="application-section-heading"><h3>Application tracker</h3><span>${active.length} tracked</span></div>${active.length?`<div class="application-card-grid">${active.map(applicationRow).join('')}</div>`:'<div class="card empty">Your tracked applications will appear here after you start an application from a job listing.</div>'}<div id="app-edit-area"></div></section><section class="application-section declined-section"><div class="application-section-heading"><h3>Rejected jobs</h3><span>${declined.length} declined</span></div>${declined.length?`<div class="application-card-grid">${declined.map(applicationRow).join('')}</div>`:'<div class="card empty">Rejected jobs stay here so you can restore them to recommendations later.</div>'}</section></section>`;
+ const active=state.applications.filter(a=>!['DECLINED','SHORTLISTED','DISCOVERED','WITHDRAWN','NOT_COMPLETED_YET'].includes(String(a.status||'').toUpperCase())),declined=state.applications.filter(a=>String(a.status||'').toUpperCase()==='DECLINED');
+ content.innerHTML=`<section class="applications-page"><div class="applications-page-heading"><div><span class="eyebrow">YOUR JOB SEARCH</span><h2>Applied Jobs</h2><p class="muted small">Track applications with the employer. Choose “Not Completed Yet” to remove one from this active list and return its job to recommendations. Withdrawn history is preserved.</p></div><div class="application-summary"><strong>${active.length}</strong><span>Active applications</span></div></div><section class="application-section"><div class="application-section-heading"><h3>Application tracker</h3><span>${active.length} tracked</span></div>${active.length?`<div class="application-card-grid">${active.map(applicationRow).join('')}</div>`:'<div class="card empty">No active applications. Start a new application from Dashboard or Jobs to see it here.</div>'}</section><section class="application-section declined-section"><div class="application-section-heading"><h3>Rejected jobs</h3><span>${declined.length} declined</span></div>${declined.length?`<div class="application-card-grid">${declined.map(applicationRow).join('')}</div>`:'<div class="card empty">Rejected jobs stay here so you can restore them to recommendations later.</div>'}</section></section>`;
  document.querySelectorAll('[data-app-edit]').forEach(b=>b.onclick=()=>editApplication(Number(b.dataset.appEdit)));
  document.querySelectorAll('[data-restore-job]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/jobs/${b.dataset.restoreJob}/restore`,{method:'POST'});toast('Job restored to recommendations');await render();}catch(e){toast(e.message)}finally{b.disabled=false;}});
 }
 async function editApplication(id){
- const a=state.applications.find(x=>x.id===id);if(!a)return;const area=document.getElementById('app-edit-area');
- const statuses=['NEEDS_ATTENTION','DISCOVERED','SHORTLISTED','DRAFT','AWAITING_APPROVAL','SUBMITTED','SUBMISSION_FAILED','INTERVIEW','REJECTED','OFFER','WITHDRAWN'];
- area.innerHTML=`<div class="card spaced-card"><h2>Update ${esc(a.jobTitle)}</h2><form id="app-form"><div class="form-grid"><div class="field"><label>Status</label><select name="status">${statuses.map(s=>`<option ${a.status===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field"><label>Application date (optional)</label><input type="date" name="appliedAt" value="${esc((a.appliedAt||'').slice(0,10))}"></div><div class="field full"><label>Notes / follow-up</label><textarea name="notes">${esc(a.notes||'')}</textarea></div><div class="field full" id="application-evidence-field" hidden><label for="application-submission-evidence">Submission confirmation evidence</label><textarea id="application-submission-evidence" maxlength="1000" placeholder="For example: confirmation number or “Application received” email"></textarea></div></div><p class="muted small">To mark submitted, provide confirmation from the employer portal or confirmation email. Menix never submits applications.</p><div class="actions"><button class="button button-primary">Save changes</button><button class="button" type="button" id="cancel-edit">Cancel</button></div></form></div>`;
+ const a=state.applications.find(x=>x.id===id);if(!a)return;const area=document.querySelector(`[data-app-edit-slot="${id}"]`);
+ if(!area)return;
+ const shouldClose=area.hasChildNodes();
+ document.querySelectorAll('.application-edit-slot').forEach(slot=>slot.replaceChildren());
+ if(shouldClose)return;
+ const statuses=['NEEDS_ATTENTION','DRAFT','AWAITING_APPROVAL','SUBMITTED','SUBMISSION_FAILED','INTERVIEW','REJECTED','OFFER','WITHDRAWN','NOT_COMPLETED_YET'];
+ const statusLabel=status=>status==='NOT_COMPLETED_YET'?'Not Completed Yet':status.replaceAll('_',' ');
+ area.innerHTML=`<div class="application-edit-card"><h3>Update application</h3><form id="app-form"><div class="form-grid"><div class="field"><label>Status</label><select name="status">${statuses.map(s=>`<option value="${s}" ${a.status===s?'selected':''}>${esc(statusLabel(s))}</option>`).join('')}</select></div><div class="field"><label>Application date (optional)</label><input type="date" name="appliedAt" value="${esc((a.appliedAt||'').slice(0,10))}"></div><div class="field full"><label>Notes / follow-up</label><textarea name="notes">${esc(a.notes||'')}</textarea></div><div class="field full" id="application-evidence-field" hidden><label for="application-submission-evidence">Submission confirmation evidence</label><textarea id="application-submission-evidence" maxlength="1000" placeholder="For example: confirmation number or “Application received” email"></textarea></div></div><p class="muted small">A status change does not submit an application. To mark submitted, provide confirmation from the employer portal or email.</p><div class="actions"><button class="button button-primary">Save changes</button><button class="button" type="button" id="cancel-edit">Cancel</button></div></form></div>`;
  document.getElementById('cancel-edit').onclick=()=>area.innerHTML='';
  const appForm=document.getElementById('app-form');
  const statusSelect=appForm.elements.status;
  const evidenceField=document.getElementById('application-evidence-field');
  statusSelect.addEventListener('change',()=>{evidenceField.hidden=statusSelect.value!=='SUBMITTED'||a.status==='SUBMITTED';});
- appForm.onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.currentTarget));if(d.status==='SUBMITTED'&&a.status!=='SUBMITTED'){const evidence=document.getElementById('application-submission-evidence').value.trim();if(!evidence){evidenceField.hidden=false;document.getElementById('application-submission-evidence').focus();toast('Add confirmation evidence before marking this submitted.');return}d.submissionEvidence=evidence}try{await api(`/applications/${id}`,{method:'PUT',body:JSON.stringify(d)});toast('Application updated');await render();}catch(err){toast(err.message)}};
+ appForm.onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.currentTarget));if(d.status==='SUBMITTED'&&a.status!=='SUBMITTED'){const evidence=document.getElementById('application-submission-evidence').value.trim();if(!evidence){evidenceField.hidden=false;document.getElementById('application-submission-evidence').focus();toast('Add confirmation evidence before marking this submitted.');return}d.submissionEvidence=evidence}try{const saved=await api(`/applications/${id}`,{method:'PUT',body:JSON.stringify(d)});state.applications=[saved,...state.applications.filter(item=>item.id!==saved.id)];if(['WITHDRAWN','NOT_COMPLETED_YET'].includes(String(d.status).toUpperCase())){if(state.browserAssistant.autoApplyTab?.applicationId===id){state.browserAssistant.autoApplyTab=null;state.browserAssistant.savedJobId=null}toast(d.status==='WITHDRAWN'?'Application withdrawn. Its history is preserved; start another application from Jobs when ready.':'Removed from Applied Jobs. This job is available again in your recommendations.');go('jobs');return}toast('Application updated');await render();}catch(err){toast(err.message)}};
 }
 function outreachDraftMessage(contactName='',company='',jobTitle=''){
  const profile=state.profile||{};
