@@ -81,55 +81,6 @@ abstract class PublicFeedConnector implements JobSourceConnector {
 }
 
 @Component
-class RemotiveJobSourceConnector extends PublicFeedConnector {
-    private final String url;
-    RemotiveJobSourceConnector(@Value("${app.remotive-url}") String url) { this.url = url; }
-    public String sourceName() { return "Remotive"; }
-    public String attributionUrl() { return "https://remotive.com/remote-jobs"; }
-    public List<JsonNode> fetch() { return rows(get(url), "jobs"); }
-    public JobListing normalize(JsonNode item) {
-        JobListing job = listing(item, text(item, "title"), text(item, "company_name"),
-                text(item, "candidate_required_location"), "", text(item, "description"),
-                text(item, "url"), "");
-        published(job, text(item, "publication_date"));
-        return job;
-    }
-    public Instant exactTimestamp(JsonNode item) { return exact(text(item, "publication_date")); }
-}
-
-@Component
-class ArbeitnowJobSourceConnector extends PublicFeedConnector {
-    private static final String URL = "https://www.arbeitnow.com/api/job-board-api";
-    public String sourceName() { return "Arbeitnow"; }
-    public String attributionUrl() { return "https://www.arbeitnow.com/"; }
-    public List<JsonNode> fetch() { return rows(get(URL), "data"); }
-    public JobListing normalize(JsonNode item) {
-        JobListing job = listing(item, text(item, "title"), text(item, "company_name"),
-                text(item, "location"), text(item, "remote"), text(item, "description"),
-                text(item, "url"), "");
-        published(job, text(item, "created_at"));
-        return job;
-    }
-    public Instant exactTimestamp(JsonNode item) { return exact(text(item, "created_at")); }
-}
-
-@Component
-class JobicyJobSourceConnector extends PublicFeedConnector {
-    private static final String URL = "https://jobicy.com/api/jobs?count=50";
-    public String sourceName() { return "Jobicy"; }
-    public String attributionUrl() { return "https://jobicy.com/"; }
-    public List<JsonNode> fetch() { return rows(get(URL), "jobs"); }
-    public JobListing normalize(JsonNode item) {
-        JobListing job = listing(item, text(item, "jobTitle"), text(item, "companyName"),
-                text(item, "jobGeo"), text(item, "jobType"), text(item, "jobDescription"),
-                text(item, "url"), "");
-        published(job, text(item, "pubDate"));
-        return job;
-    }
-    public Instant exactTimestamp(JsonNode item) { return exact(text(item, "pubDate")); }
-}
-
-@Component
 class GreenhouseJobSourceConnector extends PublicFeedConnector {
     private final String boards;
     GreenhouseJobSourceConnector(@Value("${app.greenhouse-boards:}") String boards) { this.boards = boards; }

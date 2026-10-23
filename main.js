@@ -74,7 +74,11 @@ function createWindow() {
   win.webContents.on('did-attach-webview', (_event, guest) => {
     guest.setWindowOpenHandler(({ url }) => {
       const safe = validHttpsUrl(url);
-      if (safe) guest.loadURL(safe.href).catch(error => console.error('Could not open portal link in the embedded browser:', error));
+      if (safe) {
+        const owner = guest.hostWebContents;
+        if (owner && !owner.isDestroyed()) owner.send('embedded-browser-popup', safe.href);
+        guest.loadURL(safe.href).catch(error => console.error('Could not open portal link in the embedded browser:', error));
+      }
       return { action: 'deny' };
     });
     guest.on('will-navigate', (event, url) => {

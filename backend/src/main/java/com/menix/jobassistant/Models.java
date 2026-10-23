@@ -57,7 +57,34 @@ class CandidateProfile {
 }
 
 @Entity
-@Table(name="job_listing", uniqueConstraints=@UniqueConstraint(columnNames={"sourceUrl"}))
+@Table(name="daily_sync_settings")
+class DailySyncSettings {
+    @Id private Long id = 1L;
+    private boolean enabled;
+    private String syncTime = "08:15";
+    private boolean runOnOpen;
+    private boolean companyBoardsEnabled = true;
+    private boolean adzunaEnabled = true;
+    private boolean emailAlertsEnabled = true;
+    private boolean careerPagesEnabled = true;
+    private LocalDate lastRunDate;
+    private Instant lastRunAt;
+    @Column(length=1000) private String lastError = "";
+    public Long getId(){return id;} public void setId(Long value){id=value;}
+    public boolean isEnabled(){return enabled;} public void setEnabled(boolean value){enabled=value;}
+    public String getSyncTime(){return syncTime;} public void setSyncTime(String value){syncTime=CandidateProfile.safe(value);}
+    public boolean isRunOnOpen(){return runOnOpen;} public void setRunOnOpen(boolean value){runOnOpen=value;}
+    public boolean isCompanyBoardsEnabled(){return companyBoardsEnabled;} public void setCompanyBoardsEnabled(boolean value){companyBoardsEnabled=value;}
+    public boolean isAdzunaEnabled(){return adzunaEnabled;} public void setAdzunaEnabled(boolean value){adzunaEnabled=value;}
+    public boolean isEmailAlertsEnabled(){return emailAlertsEnabled;} public void setEmailAlertsEnabled(boolean value){emailAlertsEnabled=value;}
+    public boolean isCareerPagesEnabled(){return careerPagesEnabled;} public void setCareerPagesEnabled(boolean value){careerPagesEnabled=value;}
+    public LocalDate getLastRunDate(){return lastRunDate;} public void setLastRunDate(LocalDate value){lastRunDate=value;}
+    public Instant getLastRunAt(){return lastRunAt;} public void setLastRunAt(Instant value){lastRunAt=value;}
+    public String getLastError(){return lastError;} public void setLastError(String value){lastError=CandidateProfile.safe(value);}
+}
+
+@Entity
+@Table(name="job_listing")
 class JobListing {
     @Id @GeneratedValue(strategy=GenerationType.IDENTITY) private Long id;
     private String title = ""; private String company = ""; private String location = "";
@@ -66,8 +93,11 @@ class JobListing {
     @Column(length=2000) private String requiredSkills = "";
     private LocalDate publishedAt; private LocalDateTime retrievedAt = LocalDateTime.now();
     private Instant postedAt; private Boolean exactPostingTime; private String workMode = "";
+    private Instant validThrough;
+    @Column(nullable=false, columnDefinition="boolean default false") private boolean applicationUrlVerified;
     @Column(length=2000) private String experienceRequirements = "";
     private String salary = ""; private String sourceJobId = ""; private String attributionUrl = "";
+    @Column(length=40) private String descriptionStatus = "full";
     private Instant firstSeenAt = Instant.now();
     private Instant lastSeenAt;
     private Instant lastVerifiedAt;
@@ -94,10 +124,13 @@ class JobListing {
     public LocalDate getPublishedAt(){return publishedAt;} public void setPublishedAt(LocalDate v){publishedAt=v;}
     public LocalDateTime getRetrievedAt(){return retrievedAt;} public void setRetrievedAt(LocalDateTime v){retrievedAt=v;}
     public Instant getPostedAt(){return postedAt;} public void setPostedAt(Instant v){postedAt=v;}
+    public Instant getValidThrough(){return validThrough;} public void setValidThrough(Instant v){validThrough=v;}
     public boolean isExactPostingTime(){return Boolean.TRUE.equals(exactPostingTime);} public void setExactPostingTime(Boolean v){exactPostingTime=v;}
     public String getWorkMode(){return workMode;} public void setWorkMode(String v){workMode=CandidateProfile.safe(v);}
+    public boolean isApplicationUrlVerified(){return applicationUrlVerified;} public void setApplicationUrlVerified(boolean v){applicationUrlVerified=v;}
     public String getExperienceRequirements(){return experienceRequirements;} public void setExperienceRequirements(String v){experienceRequirements=CandidateProfile.safe(v);}
     public String getSalary(){return salary;} public void setSalary(String v){salary=CandidateProfile.safe(v);}
+    public String getDescriptionStatus(){return descriptionStatus==null||descriptionStatus.isBlank()?"unknown":descriptionStatus;} public void setDescriptionStatus(String v){descriptionStatus=CandidateProfile.safe(v);}
     public String getSourceJobId(){return sourceJobId;} public void setSourceJobId(String v){sourceJobId=CandidateProfile.safe(v);}
     public String getAttributionUrl(){return attributionUrl;} public void setAttributionUrl(String v){attributionUrl=CandidateProfile.safe(v);}
     public Instant getFirstSeenAt(){return firstSeenAt;} public void setFirstSeenAt(Instant v){firstSeenAt=v;}
@@ -136,6 +169,103 @@ class JobSourceSyncState {
     public Integer getRejected(){return rejected;} public void setRejected(Integer v){rejected=v;}
     public Integer getDeduplicated(){return deduplicated;} public void setDeduplicated(Integer v){deduplicated=v;}
     public String getLatestError(){return latestError;} public void setLatestError(String v){latestError=CandidateProfile.safe(v);}
+}
+
+@Entity
+@Table(name="company_board_configuration", uniqueConstraints=@UniqueConstraint(columnNames={"provider","identifier"}))
+class CompanyBoardConfiguration {
+    @Id @GeneratedValue(strategy=GenerationType.IDENTITY) private Long id;
+    @Column(nullable=false, length=32) private String provider="";
+    @Column(nullable=false, length=100) private String identifier="";
+    @Column(nullable=false, length=180) private String company="";
+    @Column(nullable=false) private boolean enabled;
+    @Column(nullable=false, length=20) private String testStatus="UNVERIFIED";
+    private Integer lastTestJobCount;
+    private Instant lastTestAt;
+    @Column(length=1000) private String lastError="";
+    private LocalDateTime createdAt=LocalDateTime.now();
+    private LocalDateTime updatedAt=LocalDateTime.now();
+    public CompanyBoardConfiguration(){}
+    public Long getId(){return id;} public void setId(Long v){id=v;}
+    public String getProvider(){return provider;} public void setProvider(String v){provider=CandidateProfile.safe(v);}
+    public String getIdentifier(){return identifier;} public void setIdentifier(String v){identifier=CandidateProfile.safe(v);}
+    public String getCompany(){return company;} public void setCompany(String v){company=CandidateProfile.safe(v);}
+    public boolean isEnabled(){return enabled;} public void setEnabled(boolean v){enabled=v;}
+    public String getTestStatus(){return testStatus;} public void setTestStatus(String v){testStatus=CandidateProfile.safe(v);}
+    public Integer getLastTestJobCount(){return lastTestJobCount;} public void setLastTestJobCount(Integer v){lastTestJobCount=v;}
+    public Instant getLastTestAt(){return lastTestAt;} public void setLastTestAt(Instant v){lastTestAt=v;}
+    public String getLastError(){return lastError;} public void setLastError(String v){lastError=CandidateProfile.safe(v);}
+    public LocalDateTime getCreatedAt(){return createdAt;} public void setCreatedAt(LocalDateTime v){createdAt=v;}
+    public LocalDateTime getUpdatedAt(){return updatedAt;} public void setUpdatedAt(LocalDateTime v){updatedAt=v;}
+}
+
+@Entity
+@Table(name="adzuna_search_profile")
+class AdzunaSearchProfile {
+    @Id @GeneratedValue(strategy=GenerationType.IDENTITY) private Long id;
+    @Column(name="search_keyword", nullable=false, length=200) private String what="";
+    @Column(name="search_location", nullable=false, length=200) private String where="";
+    public AdzunaSearchProfile(){}
+    public AdzunaSearchProfile(String what,String where){this.what=CandidateProfile.safe(what);this.where=CandidateProfile.safe(where);}
+    public Long getId(){return id;} public void setId(Long v){id=v;}
+    public String getWhat(){return what;} public void setWhat(String v){what=CandidateProfile.safe(v);}
+    public String getWhere(){return where;} public void setWhere(String v){where=CandidateProfile.safe(v);}
+}
+
+@Entity
+@Table(name="adzuna_daily_api_usage")
+class AdzunaDailyApiUsage {
+    @Id private LocalDate usageDate;
+    @Column(nullable=false) private int calls;
+    public AdzunaDailyApiUsage(){}
+    public AdzunaDailyApiUsage(LocalDate usageDate){this.usageDate=usageDate;}
+    public LocalDate getUsageDate(){return usageDate;} public void setUsageDate(LocalDate v){usageDate=v;}
+    public int getCalls(){return calls;} public void setCalls(int v){calls=v;}
+}
+
+@Entity
+@Table(name="email_alert_settings")
+class EmailAlertSettings {
+    @Id private Long id=1L;
+    @Column(nullable=false, length=255) private String imapHost="imap.gmail.com";
+    private int imapPort=993;
+    @Column(nullable=false, length=320) private String emailAddress="";
+    @Column(nullable=false, length=512) private String encryptedPassword="";
+    @Column(nullable=false, length=255) private String folderName="INBOX";
+    @Column(nullable=false) private boolean enabled;
+    @Column(nullable=false) private boolean markSeen;
+    @Column(nullable=false, length=8000) private String allowlistJson="";
+    private Instant lastRunAt;
+    private Instant lastSuccessfulSyncAt;
+    private Integer lastImported=0;
+    @Column(length=2000) private String lastError="";
+    public EmailAlertSettings(){}
+    public Long getId(){return id;} public void setId(Long v){id=v;}
+    public String getImapHost(){return imapHost;} public void setImapHost(String v){imapHost=CandidateProfile.safe(v);}
+    public int getImapPort(){return imapPort;} public void setImapPort(int v){imapPort=v;}
+    public String getEmailAddress(){return emailAddress;} public void setEmailAddress(String v){emailAddress=CandidateProfile.safe(v);}
+    public String getEncryptedPassword(){return encryptedPassword;} public void setEncryptedPassword(String v){encryptedPassword=CandidateProfile.safe(v);}
+    public String getFolderName(){return folderName;} public void setFolderName(String v){folderName=CandidateProfile.safe(v);}
+    public boolean isEnabled(){return enabled;} public void setEnabled(boolean v){enabled=v;}
+    public boolean isMarkSeen(){return markSeen;} public void setMarkSeen(boolean v){markSeen=v;}
+    public String getAllowlistJson(){return allowlistJson;} public void setAllowlistJson(String v){allowlistJson=CandidateProfile.safe(v);}
+    public Instant getLastRunAt(){return lastRunAt;} public void setLastRunAt(Instant v){lastRunAt=v;}
+    public Instant getLastSuccessfulSyncAt(){return lastSuccessfulSyncAt;} public void setLastSuccessfulSyncAt(Instant v){lastSuccessfulSyncAt=v;}
+    public Integer getLastImported(){return lastImported;} public void setLastImported(Integer v){lastImported=v;}
+    public String getLastError(){return lastError;} public void setLastError(String v){lastError=CandidateProfile.safe(v);}
+}
+
+@Entity
+@Table(name="email_alert_processed_message")
+class EmailAlertProcessedMessage {
+    @Id @Column(length=500) private String messageId;
+    private Instant processedAt=Instant.now();
+    private Integer importedJobs=0;
+    public EmailAlertProcessedMessage(){}
+    public EmailAlertProcessedMessage(String messageId,int importedJobs){this.messageId=CandidateProfile.safe(messageId);this.importedJobs=importedJobs;}
+    public String getMessageId(){return messageId;} public void setMessageId(String v){messageId=CandidateProfile.safe(v);}
+    public Instant getProcessedAt(){return processedAt;} public void setProcessedAt(Instant v){processedAt=v;}
+    public Integer getImportedJobs(){return importedJobs;} public void setImportedJobs(Integer v){importedJobs=v;}
 }
 
 @Entity
@@ -247,6 +377,12 @@ class JobSourceConnection {
     @Column(length=2000) private String lastError="";
     private LocalDateTime lastTestAt;
     private LocalDateTime lastSyncAt;
+    private Instant lastSuccessfulSyncAt;
+    private Integer lastFetched=0;
+    private Integer lastImported=0;
+    private Integer lastUpdated=0;
+    private Integer lastRejected=0;
+    private Integer lastDeduplicated=0;
     private LocalDateTime createdAt=LocalDateTime.now();
     public JobSourceConnection(){}
     public Long getId(){return id;} public void setId(Long v){id=v;}
@@ -261,6 +397,12 @@ class JobSourceConnection {
     public String getLastError(){return lastError;} public void setLastError(String v){lastError=CandidateProfile.safe(v);}
     public LocalDateTime getLastTestAt(){return lastTestAt;} public void setLastTestAt(LocalDateTime v){lastTestAt=v;}
     public LocalDateTime getLastSyncAt(){return lastSyncAt;} public void setLastSyncAt(LocalDateTime v){lastSyncAt=v;}
+    public Instant getLastSuccessfulSyncAt(){return lastSuccessfulSyncAt;} public void setLastSuccessfulSyncAt(Instant v){lastSuccessfulSyncAt=v;}
+    public Integer getLastFetched(){return lastFetched;} public void setLastFetched(Integer v){lastFetched=v;}
+    public Integer getLastImported(){return lastImported;} public void setLastImported(Integer v){lastImported=v;}
+    public Integer getLastUpdated(){return lastUpdated;} public void setLastUpdated(Integer v){lastUpdated=v;}
+    public Integer getLastRejected(){return lastRejected;} public void setLastRejected(Integer v){lastRejected=v;}
+    public Integer getLastDeduplicated(){return lastDeduplicated;} public void setLastDeduplicated(Integer v){lastDeduplicated=v;}
     public LocalDateTime getCreatedAt(){return createdAt;} public void setCreatedAt(LocalDateTime v){createdAt=v;}
 }
 

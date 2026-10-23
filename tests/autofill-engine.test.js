@@ -15,7 +15,7 @@ class MockEvent {
 }
 
 class MockElement {
-  constructor(doc, { tag = 'INPUT', type = 'text', label = '', name = '', value = '', required = false, options = [], checked = false } = {}) {
+  constructor(doc, { tag = 'INPUT', type = 'text', label = '', name = '', value = '', required = false, options = [], checked = false, hidden = false } = {}) {
     this.ownerDocument = doc;
     this.tagName = tag;
     this.type = type;
@@ -39,10 +39,11 @@ class MockElement {
     this.clicks = 0;
     this.isConnected = true;
     this.form = null;
+    this.hidden = hidden;
   }
   get value() { return this._value; }
   set value(value) { this._value = String(value); }
-  getClientRects() { return [{}]; }
+  getClientRects() { return this.hidden ? [] : [{}]; }
   getAttribute(name) { return this.attributes[name] || null; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; }
@@ -61,7 +62,7 @@ class MockDocument {
     });
     this.defaultView = {
       Event: MockEvent,
-      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+      getComputedStyle: element => ({ display: element.hidden ? 'none' : 'block', visibility: 'visible' }),
       HTMLInputElement: { prototype: inputElementPrototype },
       HTMLTextAreaElement: { prototype: textareaElementPrototype }
     };
@@ -73,7 +74,7 @@ class MockDocument {
     submitControls.forEach(element => { element.ownerDocument = this; });
   }
   querySelectorAll(selector) {
-    if (selector === 'iframe,frame') return this.frames;
+    if (selector === 'iframe,frame' || selector === 'iframe') return this.frames;
     if (selector === 'input,textarea,select') return this.controls;
     if (selector === 'button[type="submit"],input[type="submit"],[role="button"][aria-label*="submit" i]') return this.submitControls;
     if (selector.includes('[data-menix-autofill-id=')) {
@@ -116,12 +117,15 @@ test('classifies HTTPS platforms conservatively and disables LinkedIn automation
 test('maps exact profile fields, choices and skill checkboxes while refusing ambiguous or sensitive answers', () => {
   const profile = { fullName: 'Ada Lovelace', email: 'ada@example.test', skills: 'Java, SQL' };
   assert.equal(engine.mapField({ type: 'text', label: 'Full name' }, profile).value, 'Ada Lovelace');
+  assert.equal(engine.mapField({ type: 'text', label: 'Name' }, profile).value, 'Ada Lovelace');
+  assert.equal(engine.mapField({ type: 'text', label: 'Company name' }, profile).status, 'unmapped');
+  assert.equal(engine.mapField({ type: 'text', autocomplete: 'name' }, profile).value, 'Ada Lovelace');
   assert.equal(engine.mapField({ type: 'text', label: 'First name' }, profile).value, 'Ada');
+  assert.equal(engine.mapField({ type: 'text', label: 'Last name' }, profile).value, 'Lovelace');
   assert.equal(engine.mapField({ type: 'select', label: 'Work location', options: [{ value: 'remote', label: 'Remote' }] }, { preferredLocations: 'Remote' }).value, 'remote');
   assert.equal(engine.mapField({ type: 'checkbox', label: 'Java' }, profile).value, true);
   assert.equal(engine.mapField({ type: 'text', label: 'Legal work authorization' }, profile).status, 'manual');
   assert.equal(engine.mapField({ type: 'number', label: 'Expected salary' }, profile).status, 'manual');
-  assert.equal(engine.mapField({ type: 'text', label: 'Name' }, profile).status, 'unmapped');
 });
 
 test('scans dynamic text, select, radio, checkbox, file upload and submit controls', () => {
@@ -157,6 +161,52 @@ test('scans dynamic text, select, radio, checkbox, file upload and submit contro
   assert.ok(runPage(engine.scanScript(), doc).fields.some(field => field.label === 'Phone'));
 });
 
+test('does not block CAPTCHA privacy notices but pauses on an active challenge', () => {
+  const notice = new MockDocument([], [], 'This site is protected by reCAPTCHA and the Google Privacy Policy and Terms of Service apply.');
+  assert.equal(runPage(engine.scanScript(), notice).blocked, false);
+
+  const prompt = new MockDocument([], [], 'Complete the CAPTCHA to continue.');
+  assert.equal(runPage(engine.scanScript(), prompt).blocked, true);
+
+  const challengeFrame = { src: 'https://www.google.com/recaptcha/api2/bframe', title: '', ownerDocument: null };
+  const framedChallenge = new MockDocument([], []);
+  framedChallenge.frames.push(challengeFrame);
+  assert.equal(runPage(engine.scanScript(), framedChallenge).blocked, true);
+});
+
+test('detects hidden file inputs only when paired with a visible, named upload control', () => {
+  const hiddenInput = new MockElement(null, { type: 'file', hidden: true });
+  const trigger = {
+    innerText: 'Attach Resume',
+    ownerDocument: null,
+    title: '',
+    getAttribute: () => null,
+    getClientRects: () => [{}]
+  };
+  const wrapper = { querySelectorAll: () => [trigger], parentElement: null };
+  hiddenInput.parentElement = wrapper;
+  const doc = new MockDocument([hiddenInput]);
+  trigger.ownerDocument = doc;
+  const result = runPage(engine.scanScript(), doc);
+  assert.equal(result.uploads.length, 1);
+  assert.equal(result.uploads[0].label, 'Attach Resume');
+  assert.equal(runPage(engine.clickUploadScript(result.uploads[0].id), doc).opened, true);
+
+  const unrelatedHiddenInput = new MockElement(null, { type: 'file', hidden: true });
+  assert.equal(runPage(engine.scanScript(), new MockDocument([unrelatedHiddenInput])).uploads.length, 0);
+});
+
+test('keeps a stable field signature when dynamic form element IDs change', () => {
+  const field = new MockElement(null, { label: 'Email' });
+  field.id = 'input-1';
+  const doc = new MockDocument([field]);
+  const first = runPage(engine.scanScript(), doc).fields[0];
+  field.id = 'input-2';
+  const second = runPage(engine.scanScript(), doc).fields[0];
+  assert.notEqual(first.signature, second.signature);
+  assert.equal(first.stableSignature, second.stableSignature);
+});
+
 test('fills blank text, dropdown, radio and profile-skill checkbox controls with input events', () => {
   const text = new MockElement(null, { label: 'Email', type: 'email', required: true });
   const select = new MockElement(null, { tag: 'SELECT', label: 'Preferred location', options: [{ value: 'remote', label: 'Remote' }] });
@@ -182,10 +232,15 @@ test('fills blank text, dropdown, radio and profile-skill checkbox controls with
   assert.ok(text.events.includes('input') && text.events.includes('change'));
 });
 
-test('requires explicit permission, completed required fields, review, and a unique submit control', () => {
-  const base = { reviewed: true, permissionConfirmed: true, requiredMissing: 0, submitCandidateCount: 1, blocked: false };
+test('recognizes a required marker in a visible field label', () => {
+  const email = new MockElement(null, { label: 'Email *' });
+  const scan = runPage(engine.scanScript(), new MockDocument([email]));
+  assert.equal(scan.fields[0].required, true);
+});
+
+test('requires completed required fields, review, and a unique submit control', () => {
+  const base = { reviewed: true, requiredMissing: 0, submitCandidateCount: 1, blocked: false };
   assert.equal(engine.canSubmit(base).allowed, true);
-  assert.equal(engine.canSubmit({ ...base, permissionConfirmed: false }).allowed, false);
   assert.equal(engine.canSubmit({ ...base, reviewed: false }).allowed, false);
   assert.equal(engine.canSubmit({ ...base, requiredMissing: 1 }).allowed, false);
   assert.equal(engine.canSubmit({ ...base, unsupportedCount: 1 }).allowed, false);
@@ -221,7 +276,9 @@ test('does not expose the autofill bridge to websites and keeps the application 
   assert.match(main, /sandbox:\s*true/);
   assert.match(main, /delete webPreferences\.preload/);
   assert.doesNotMatch(main, /autofill-application/);
-  assert.doesNotMatch(preload, /autofillApplication|ipcRenderer\.send|ipcRenderer\.on/);
+  assert.doesNotMatch(preload, /autofillApplication|ipcRenderer\.send/);
+  assert.match(preload, /onEmbeddedBrowserPopup/);
+  assert.match(preload, /ipcRenderer\.on\('embedded-browser-popup', listener\)/);
   const submitStart = renderer.indexOf('async function submitAutoApplyForm()');
   const submitEnd = renderer.indexOf('\nfunction applicationRow(a)', submitStart);
   const submitFlow = renderer.slice(submitStart, submitEnd);

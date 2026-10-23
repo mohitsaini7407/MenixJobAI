@@ -68,6 +68,25 @@ public class JobMatchingService {
         if(j.getPostedAt()!=null&&j.getPostedAt().isAfter(now))return false;
         if(j.getPublishedAt()!=null&&j.getPublishedAt().isAfter(LocalDate.ofInstant(now,ZoneOffset.UTC)))return false;
         String selected=Objects.toString(range,"24h").toLowerCase(Locale.ROOT);
+        if ("MANUAL".equalsIgnoreCase(Objects.toString(j.getImportMethod(),""))&&j.getPostedAt()==null&&j.getPublishedAt()==null) {
+            if (j.getFirstSeenAt()==null) return false;
+            long age=Duration.between(j.getFirstSeenAt(),now).toMinutes();
+            if (age<0) return false;
+            if ("older".equals(selected)) return age>7L*24*60;
+            if ("all".equals(selected)) return true;
+            int hours=switch(selected){case "3d"->72;case "7d"->168;default->24;};
+            return age<=hours*60L;
+        }
+        if (Objects.toString(j.getSource(),"").toLowerCase(Locale.ROOT).endsWith(" alert")
+                && j.getPostedAt()==null && j.getPublishedAt()==null) {
+            if (j.getFirstSeenAt()==null) return false;
+            long age=Duration.between(j.getFirstSeenAt(),now).toMinutes();
+            if (age<0) return false;
+            if ("older".equals(selected)) return age>7L*24*60;
+            if ("all".equals(selected)) return true;
+            int hours=switch(selected){case "3d"->72;case "7d"->168;default->24;};
+            return age<=hours*60L;
+        }
         if("all".equals(selected)) return true;
         if("older".equals(selected)) {
             if(j.isExactPostingTime()&&j.getPostedAt()!=null)return Duration.between(j.getPostedAt(),now).toHours()>168;
@@ -76,7 +95,15 @@ public class JobMatchingService {
             return postingDate!=null&&ChronoUnit.DAYS.between(postingDate,LocalDate.ofInstant(now,ZoneOffset.UTC))>7;
         }
         int hours=switch(selected){case "3d"->72;case "7d"->168;default->24;};
+        if(Set.of("BROWSER_PAGE","BROWSER_SEARCH_RESULTS").contains(Objects.toString(j.getImportMethod(),"").toUpperCase(Locale.ROOT))
+                &&j.getPublishedAt()==null&&j.getPostedAt()==null){
+            if(j.getLastVerifiedAt()==null)return false;
+            long age=Duration.between(j.getLastVerifiedAt(),now).toMinutes();
+            return age>=0&&age<=hours*60L;
+        }
         if(j.isExactPostingTime()&&j.getPostedAt()!=null)return Duration.between(j.getPostedAt(),now).toHours()<=hours;
+        if(hours==24&&"Naukri".equalsIgnoreCase(j.getSource())&&j.getPublishedAt()!=null)
+            return j.getPublishedAt().equals(LocalDate.ofInstant(now,ZoneOffset.UTC));
         if(hours==24||j.getPublishedAt()==null)return false;
         long days=ChronoUnit.DAYS.between(j.getPublishedAt(),LocalDate.ofInstant(now,ZoneOffset.UTC));return days>=0&&days<hours/24;
     }

@@ -27,7 +27,6 @@
   ];
   const blockedHosts = [/^([a-z0-9-]+\.)*linkedin\.com$/i];
   const sensitiveTerms = /\b(work authorization|authorized to work|visa|sponsor(ship)?|salary|compensation|gender|sex|ethnicity|race|disabilit(y|ies)|veteran|citizenship|date of birth|birth ?date|age|social security|ssn|tax id|criminal|conviction|background check|security clearance|consent|agree|terms and conditions|legally authorized|are you|do you|will you|have you ever|how many years)\b/i;
-  const challengeTerms = /\b(captcha|recaptcha|hcaptcha|verify you are human|not a robot|robot verification|security challenge|security check|unusual traffic)\b/i;
 
   function normalize(value) {
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -73,6 +72,13 @@
       return { status: 'manual', value: '', confidence: 0, reason: 'This checkbox is not an exact match for a saved skill.' };
     }
     const matches = profileFields.filter(([, pattern]) => pattern.test(label));
+    const genericNameField = normalize(field.label) === 'name'
+      || normalize(field.autocomplete) === 'name'
+      || (!field.label && /^(name|applicant name|candidate name)$/.test(normalize(`${field.name || ''} ${field.elementId || ''}`)));
+    if (!matches.length && genericNameField) {
+      const fullName = profileFields.find(([key]) => key === 'fullName');
+      if (fullName) matches.push(fullName);
+    }
     if (!matches.length) return { status: 'unmapped', value: '', confidence: 0, reason: 'No matching fact exists in the saved candidate profile.' };
     matches.sort((a, b) => b[2] - a[2]);
     if (matches.length > 1 && matches[0][2] - matches[1][2] < 2) {
@@ -97,9 +103,8 @@
     return { status: 'mapped', key, value, confidence: Math.min(0.98, matches[0][2] / 6), reason: 'Exact profile field match.' };
   }
 
-  function canSubmit({ reviewed, permissionConfirmed, requiredMissing, validationIssues = 0, unsupportedCount = 0, submitCandidateCount, blocked }) {
+  function canSubmit({ reviewed, requiredMissing, validationIssues = 0, unsupportedCount = 0, submitCandidateCount, blocked }) {
     if (blocked) return { allowed: false, reason: 'The page is blocked for automated interaction.' };
-    if (!permissionConfirmed) return { allowed: false, reason: 'Site permission has not been confirmed.' };
     if (!reviewed) return { allowed: false, reason: 'Review the completed form first.' };
     if (Number(requiredMissing) > 0) return { allowed: false, reason: 'Required fields are incomplete.' };
     if (Number(validationIssues) > 0) return { allowed: false, reason: 'One or more fields have validation errors.' };
@@ -110,7 +115,7 @@
 
   function scanPage() {
     const sensitiveTerms = /\b(work authorization|authorized to work|visa|sponsor(ship)?|salary|compensation|gender|sex|ethnicity|race|disabilit(y|ies)|veteran|citizenship|date of birth|birth ?date|age|social security|ssn|tax id|criminal|conviction|background check|security clearance|consent|agree|terms and conditions|legally authorized|are you|do you|will you|have you ever|how many years)\b/i;
-    const challengeTerms = /\b(captcha|recaptcha|hcaptcha|verify you are human|not a robot|robot verification|security challenge|security check|unusual traffic)\b/i;
+    const challengeTerms = /\b(?:complete|solve|verify|verification|select|click|check)\b.{0,60}\b(?:captcha|recaptcha|hcaptcha|not a robot|security challenge)\b|\b(?:captcha|recaptcha|hcaptcha|security challenge)\b.{0,60}\b(?:required|verification|challenge|invalid|incorrect|to continue|to proceed)\b|\b(?:verify you are human|not a robot|robot verification|unusual traffic)\b/i;
     const documents = [];
     let inaccessibleFrames = 0;
     const collect = doc => {
@@ -125,7 +130,7 @@
     };
     collect(document);
     const bodyText = documents.map(doc => String(doc.body?.innerText || '').slice(0, 30000)).join(' ');
-    const challengeFrame = documents.some(doc => [...doc.querySelectorAll('iframe')].some(frame => /captcha|challenge/i.test(`${frame.src || ''} ${frame.title || ''}`)));
+    const challengeFrame = documents.some(doc => [...doc.querySelectorAll('iframe')].some(frame => /(?:recaptcha|hcaptcha|captcha).*(?:bframe|challenge|verify)|(?:bframe|challenge|verify).*(?:recaptcha|hcaptcha|captcha)/i.test(`${frame.src || ''} ${frame.title || ''}`)));
     if (challengeTerms.test(bodyText) || challengeFrame) return { blocked: true, reason: 'A CAPTCHA or security challenge is present. Complete it manually; autofill is paused.', fields: [], uploads: [], submitCandidates: [] };
     const fields = [];
     const uploads = [];
@@ -139,6 +144,17 @@
       const style = element.ownerDocument.defaultView.getComputedStyle(element);
       return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
     };
+    const visibleUploadTrigger = element => {
+      let ancestor = element.parentElement;
+      for (let depth = 0; ancestor && depth < 4; depth++, ancestor = ancestor.parentElement) {
+        const trigger = [...ancestor.querySelectorAll('button,[role="button"],label')]
+          .find(candidate => visible(candidate) && /\b(attach|upload|resume|curriculum vitae|cv|choose file|select file)\b/i.test(
+            `${text(candidate)} ${candidate.getAttribute('aria-label') || ''} ${candidate.title || ''}`
+          ));
+        if (trigger) return text(trigger) || trigger.getAttribute('aria-label') || trigger.title || '';
+      }
+      return '';
+    };
     const labelFor = element => {
       const associated = element.labels ? [...element.labels].map(text).filter(Boolean).join(' / ') : '';
       if (associated) return associated;
@@ -146,29 +162,38 @@
         .map(id => text(element.ownerDocument.getElementById(id))).filter(Boolean).join(' ');
       return labelledBy || element.getAttribute('aria-label') || text(element.closest('label')) || element.name || element.placeholder || '';
     };
+    const requiredFor = element => {
+      if (element.required || element.getAttribute('aria-required') === 'true') return true;
+      const labels = [...(element.labels || []), element.closest('label'), element.closest('fieldset')?.querySelector('legend')].filter(Boolean);
+      return labels.some(label => /\*/.test(text(label)));
+    };
     const signatureFor = field => JSON.stringify([field.type, field.elementId, field.name, field.label, field.context, field.placeholder, field.autocomplete, field.options]);
+    const stableSignatureFor = field => JSON.stringify([field.type, field.name, field.label, field.context, field.placeholder, field.autocomplete, field.options]);
     for (const doc of documents) {
       doc.querySelectorAll('[data-menix-autofill-id]').forEach(element => element.removeAttribute('data-menix-autofill-id'));
       const allNodes = [...doc.querySelectorAll('input,textarea,select')];
       const nodes = allNodes.filter(element => !authForms.has(element.form || element.closest('form')));
       const radioGroups = new Set();
       for (const element of nodes) {
-        if (element.disabled || element.readOnly || !visible(element)) continue;
+        if (element.disabled || element.readOnly) continue;
         const type = element.tagName === 'TEXTAREA' ? 'textarea' : element.tagName === 'SELECT' ? 'select' : String(element.type || 'text').toLowerCase();
         if (type === 'file') {
+          const triggerLabel = visible(element) ? '' : visibleUploadTrigger(element);
+          if (!visible(element) && !triggerLabel) continue;
           const id = `u${sequence++}`;
           element.setAttribute('data-menix-autofill-id', id);
-          uploads.push({ id, label: labelFor(element), accept: element.accept || '', multiple: Boolean(element.multiple), required: Boolean(element.required || element.getAttribute('aria-required') === 'true'), blank: !element.files?.length, invalid: element.getAttribute('aria-invalid') === 'true' || Boolean(element.files?.length && element.validity?.valid === false) });
+          uploads.push({ id, label: labelFor(element) || triggerLabel, accept: element.accept || '', multiple: Boolean(element.multiple), required: requiredFor(element), blank: !element.files?.length, invalid: element.getAttribute('aria-invalid') === 'true' || Boolean(element.files?.length && element.validity?.valid === false) });
           continue;
         }
+        if (!visible(element)) continue;
         if (type === 'password') continue;
         if (type === 'submit' || type === 'button') continue;
         if (!['text', 'email', 'tel', 'url', 'date', 'number', 'textarea', 'select', 'radio', 'checkbox'].includes(type)) {
-          unsupported.push({ label: labelFor(element), type, required: Boolean(element.required || element.getAttribute('aria-required') === 'true'), reason: `The ${type} input type is not supported for autofill.` });
+          unsupported.push({ label: labelFor(element), type, required: requiredFor(element), reason: `The ${type} input type is not supported for autofill.` });
           continue;
         }
         if (type === 'select' && element.multiple) {
-          unsupported.push({ label: labelFor(element), type: 'multi-select', required: Boolean(element.required || element.getAttribute('aria-required') === 'true'), reason: 'Multi-select controls are not supported; select values manually.' });
+          unsupported.push({ label: labelFor(element), type: 'multi-select', required: requiredFor(element), reason: 'Multi-select controls are not supported; select values manually.' });
           continue;
         }
         if (type === 'radio') {
@@ -182,8 +207,9 @@
           const id = `f${sequence++}`;
           group.forEach(item => item.setAttribute('data-menix-autofill-id', id));
           const selected = group.find(item => item.checked);
-          const field = { id, type, label, name: element.name || '', elementId: element.id || '', context: legend, placeholder: '', required: group.some(item => item.required || item.getAttribute('aria-required') === 'true'), value: selected?.value || '', blank: !selected, invalid: Boolean(selected && (selected.getAttribute('aria-invalid') === 'true' || selected.validity?.valid === false)), maxLength: 5000, options };
+          const field = { id, type, label, name: element.name || '', elementId: element.id || '', context: legend, placeholder: '', required: group.some(requiredFor), value: selected?.value || '', blank: !selected, invalid: Boolean(selected && (selected.getAttribute('aria-invalid') === 'true' || selected.validity?.valid === false)), maxLength: 5000, options };
           field.signature = signatureFor(field);
+          field.stableSignature = stableSignatureFor(field);
           field.sensitive = sensitiveTerms.test(`${label} ${field.name} ${field.context}`);
           fields.push(field);
           continue;
@@ -192,7 +218,7 @@
           if (!visible(element) || element.disabled) continue;
           if (element.matches?.('input,textarea,select')) continue;
           const label=labelFor(element)||text(element);
-          unsupported.push({label:label||'Unlabeled custom control',type:element.getAttribute('role')||'contenteditable',required:element.getAttribute('aria-required')==='true',reason:'This custom widget is not safely writable; complete it on the employer page.'});
+          unsupported.push({label:label||'Unlabeled custom control',type:element.getAttribute('role')||'contenteditable',required:requiredFor(element),reason:'This custom widget is not safely writable; complete it on the employer page.'});
         }
         const label = labelFor(element);
         const context = [text(element.closest('fieldset')?.querySelector('legend')), element.getAttribute('aria-describedby')?.split(/\s+/).map(id => text(doc.getElementById(id))).filter(Boolean).join(' '), element.title].filter(Boolean).join(' ');
@@ -203,7 +229,7 @@
           : [];
         const field = {
           id, type, label, name: element.name || '', elementId: element.id || '', autocomplete: element.autocomplete || '', context,
-          placeholder: element.placeholder || '', required: Boolean(element.required || element.getAttribute('aria-required') === 'true'),
+          placeholder: element.placeholder || '', required: requiredFor(element),
           value: type === 'checkbox' ? String(element.checked) : String(element.value || ''),
           blank: type === 'checkbox' ? !element.checked : type === 'select'
             ? (!element.value || element.selectedIndex === 0 && /^(select|choose|please select|--)/i.test(text(element.options[element.selectedIndex])))
@@ -213,6 +239,7 @@
           options
         };
         field.signature = signatureFor(field);
+        field.stableSignature = stableSignatureFor(field);
         field.sensitive = sensitiveTerms.test(`${label} ${field.name} ${context} ${field.placeholder}`);
         fields.push(field);
       }

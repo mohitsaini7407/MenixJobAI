@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "JobPosting",
+        "identifier": {"@type": "PropertyValue", "value": "sample-active-01"},
+        "title": "Junior Full Stack Engineer",
+        "hiringOrganization": {"@type": "Organization", "name": "Example Systems"},
+        "jobLocation": {"@type": "Place", "address": {
+          "@type": "PostalAddress", "addressLocality": "Jaipur",
+          "addressRegion": "Rajasthan", "addressCountry": {"name": "India"}
+        }},
+        "datePosted": "2026-10-20",
+        "validThrough": "2099-12-31",
+        "employmentType": ["FULL_TIME", "CONTRACTOR"],
+        "description": "<p>Build <strong>accessible</strong> web applications.</p><img src=x onerror=bad()>",
+        "url": "https://careers.example.test/jobs/full-stack-01",
+        "applicationUrl": "https://careers.example.test/jobs/full-stack-01/apply"
+      },
+      [
+        {
+          "@type": ["Thing", "JobPosting"],
+          "title": "Closed Example Role",
+          "hiringOrganization": {"name": "Sample Employer"},
+          "jobLocation": [{"address": {"addressLocality": "Pune", "addressCountry": "India"}}],
+          "datePosted": "2026-10-01T12:00:00Z",
+          "validThrough": "2000-01-01",
+          "employmentType": "PART_TIME",
+          "description": "Plain text description.",
+          "url": "https://careers.example.test/jobs/closed-02"
+        }
+      ]
+    ]
+  }
+  </script>
+  <script type="application/ld+json">[{"@type":"Organization","name":"Ignored"}]</script>
+</head>
+<body></body>
+</html>

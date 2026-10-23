@@ -1,0 +1,38 @@
+{
+  "totalFound": 1,
+  "offset": 0,
+  "limit": 100,
+  "content": [
+    {
+      "id": "smart-303",
+      "uuid": "a1b2c3",
+      "name": "Graduate Application Developer",
+      "company": {
+        "name": "Sample SmartRecruiters India"
+      },
+      "location": {
+        "city": "Hyderabad",
+        "region": "Telangana",
+        "country": "India",
+        "remote": false
+      },
+      "releasedDate": "2026-10-19",
+      "ref": "https://jobs.smartrecruiters.com/sample/743999999999999",
+      "typeOfEmployment": {
+        "label": "Full-time"
+      },
+      "jobAd": {
+        "sections": {
+          "jobDescription": {
+            "title": "Job Description",
+            "text": "<p>Develop internal applications.</p>"
+          },
+          "qualifications": {
+            "title": "Qualifications",
+            "text": "<ul><li>Java or TypeScript</li></ul>"
+          }
+        }
+      }
+    }
+  ]
+}

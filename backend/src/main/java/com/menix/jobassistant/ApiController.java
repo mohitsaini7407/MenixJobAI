@@ -13,21 +13,24 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.transaction.annotation.Transactional;
 import java.nio.file.*;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(originPatterns = "*")
+@CrossOrigin(originPatterns = "null")
 public class ApiController {
     private final ProfileRepository profiles;
     private final JobRepository jobs;
     private final ApplicationRepository applications;
     private final JobSourceService source;
+    private final CompanyBoardService companyBoardService;
     private final ResumeParserService resumeParser;
     private final JobMatchingService matching;
     private final GeminiMatchService gemini;
@@ -37,13 +40,20 @@ public class ApiController {
     private final AutofillSessionRepository autofillSessions;
     private final SmartApplyAnswerRepository smartApplyAnswers;
     private final SmartApplyPreferencesRepository smartApplyPreferences;
+    private final JobSourceSyncStateRepository jobSourceSyncStates;
+    private final AdzunaSearchProfileService adzunaSearchProfiles;
+    private final EmailAlertSettingsService emailAlertSettings;
+    private final EmailAlertImportService emailAlertImporter;
+    private final CareerPageService careerPages;
+    private final DailySyncService dailySync;
     @Value("${app.upload-dir:./uploads}") private String uploadDir;
     @Value("${app.job-verification-max-age-hours:48}") private long verificationMaxAgeHours;
+    @Value("${app.retired-job-sources:Remotive,Arbeitnow,Jobicy,RemoteOK}") private String retiredJobSources;
     private static final Set<String> STATUSES = Set.of("DISCOVERED","SHORTLISTED","DRAFT","AWAITING_APPROVAL","NEEDS_ATTENTION","APPLYING","SUBMITTED","SUBMISSION_FAILED","INTERVIEW","REJECTED","OFFER","WITHDRAWN","DECLINED","NOT_COMPLETED_YET");
     private static final List<String> SKILLS = List.of("java","spring boot","sql","postgresql","python","javascript","typescript","react","node.js","docker","aws","kubernetes","rest api","git","hibernate","jpa","microservices");
 
-    public ApiController(ProfileRepository profiles, JobRepository jobs, ApplicationRepository applications, JobSourceService source, ResumeParserService resumeParser, JobMatchingService matching, GeminiMatchService gemini, SourceRegistryService sourceRegistry, OutreachService outreach, PortalCapabilityRegistry portalCapabilities, AutofillSessionRepository autofillSessions, SmartApplyAnswerRepository smartApplyAnswers, SmartApplyPreferencesRepository smartApplyPreferences) {
-        this.profiles=profiles; this.jobs=jobs; this.applications=applications; this.source=source; this.resumeParser=resumeParser; this.matching=matching; this.gemini=gemini; this.sourceRegistry=sourceRegistry; this.outreach=outreach; this.portalCapabilities=portalCapabilities; this.autofillSessions=autofillSessions; this.smartApplyAnswers=smartApplyAnswers; this.smartApplyPreferences=smartApplyPreferences;
+    public ApiController(ProfileRepository profiles, JobRepository jobs, ApplicationRepository applications, JobSourceService source, CompanyBoardService companyBoardService, ResumeParserService resumeParser, JobMatchingService matching, GeminiMatchService gemini, SourceRegistryService sourceRegistry, OutreachService outreach, PortalCapabilityRegistry portalCapabilities, AutofillSessionRepository autofillSessions, SmartApplyAnswerRepository smartApplyAnswers, SmartApplyPreferencesRepository smartApplyPreferences, JobSourceSyncStateRepository jobSourceSyncStates, AdzunaSearchProfileService adzunaSearchProfiles, EmailAlertSettingsService emailAlertSettings, EmailAlertImportService emailAlertImporter, CareerPageService careerPages, DailySyncService dailySync) {
+        this.profiles=profiles; this.jobs=jobs; this.applications=applications; this.source=source; this.companyBoardService=companyBoardService; this.resumeParser=resumeParser; this.matching=matching; this.gemini=gemini; this.sourceRegistry=sourceRegistry; this.outreach=outreach; this.portalCapabilities=portalCapabilities; this.autofillSessions=autofillSessions; this.smartApplyAnswers=smartApplyAnswers; this.smartApplyPreferences=smartApplyPreferences; this.jobSourceSyncStates=jobSourceSyncStates; this.adzunaSearchProfiles=adzunaSearchProfiles; this.emailAlertSettings=emailAlertSettings; this.emailAlertImporter=emailAlertImporter; this.careerPages=careerPages; this.dailySync=dailySync;
     }
 
     @GetMapping("/health") public Map<String,Object> health(){ return Map.of("status","UP","service","menix-job-assistant","time",LocalDateTime.now().toString()); }
@@ -150,12 +160,12 @@ public class ApiController {
         }catch(NumberFormatException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,name+" must be between 0.5 and 1.0.");}
     }
 
-    @GetMapping("/jobs") public List<Map<String,Object>> listJobs(@RequestParam(required=false) String q, @RequestParam(defaultValue="24h") String freshness, @RequestParam(defaultValue="80") int minScore, @RequestParam(defaultValue="match") String sort, @RequestParam(required=false) String location, @RequestParam(required=false) String role, @RequestParam(defaultValue="true") boolean activeOnly, @RequestParam(defaultValue="0") int limit) {
+    @GetMapping("/jobs") public List<Map<String,Object>> listJobs(@RequestParam(required=false) String q, @RequestParam(defaultValue="24h") String freshness, @RequestParam(defaultValue="80") int minScore, @RequestParam(defaultValue="match") String sort, @RequestParam(required=false) String location, @RequestParam(required=false) String role, @RequestParam(defaultValue="true") boolean activeOnly, @RequestParam(defaultValue="0") int limit, @RequestParam(required=false) String source) {
         CandidateProfile profile=getProfile();
         java.time.Instant now=java.time.Instant.now();
         Set<Long> inactive=applications.findAll().stream().filter(a->Set.of("DECLINED","SUBMITTED","NEEDS_ATTENTION","APPLYING").contains(a.getStatus())).map(JobApplication::getJobId).collect(Collectors.toSet());
-        return jobs.findAll().stream().filter(j->!isRemovedProvider(j)).filter(j->!Set.of("CLOSED","EXPIRED","INVALID").contains(Objects.toString(j.getAvailabilityStatus(),"").toUpperCase(Locale.ROOT)))
-          .filter(j->!inactive.contains(j.getId())).filter(j->!activeOnly||isCurrentlyVerified(j,now)).filter(j->q==null || (j.getTitle()+" "+j.getCompany()+" "+j.getLocation()+" "+j.getRequiredSkills()).toLowerCase().contains(q.toLowerCase()))
+        return jobs.findAll().stream().filter(j->!isRemovedProvider(j)).filter(j->source==null||j.getSource().equalsIgnoreCase(source)).filter(j->!Set.of("CLOSED","EXPIRED","INVALID").contains(Objects.toString(j.getAvailabilityStatus(),"").toUpperCase(Locale.ROOT)))
+          .filter(j->!inactive.contains(j.getId())).filter(j->!activeOnly||isRecommendationEligible(j,now)).filter(j->q==null || (j.getTitle()+" "+j.getCompany()+" "+j.getLocation()+" "+j.getWorkMode()+" "+j.getRequiredSkills()).toLowerCase().contains(q.toLowerCase()))
           .filter(j->matching.fresh(j,freshness,now))
           .filter(j->locationMatches(j,location))
           .filter(j->role==null||j.getTitle().toLowerCase().contains(role.toLowerCase()))
@@ -165,17 +175,89 @@ public class ApiController {
           .limit(limit>0?Math.min(limit,500):Long.MAX_VALUE)
           .collect(Collectors.toList());
     }
-    @GetMapping("/stats") public Map<String,Object> dashboardStats(@RequestParam(defaultValue="true") boolean includeStrongMatches,@RequestParam(defaultValue="7d") String freshness,@RequestParam(defaultValue="80") int minScore){
+    @GetMapping("/stats") public Map<String,Object> dashboardStats(@RequestParam(defaultValue="true") boolean includeStrongMatches,@RequestParam(defaultValue="7d") String freshness,@RequestParam(defaultValue="80") int minScore,@RequestParam(required=false) String source,@RequestParam(required=false) String q,@RequestParam(required=false) String location){
         java.time.Instant now=java.time.Instant.now();
         Set<Long> inactive=applications.findAll().stream().filter(a->Set.of("DECLINED","SUBMITTED","NEEDS_ATTENTION","APPLYING").contains(a.getStatus())).map(JobApplication::getJobId).collect(Collectors.toSet());
-        List<JobListing> eligible=jobs.findAll().stream().filter(job->!isRemovedProvider(job)&&!inactive.contains(job.getId()))
+        List<JobListing> eligible=jobs.findAll().stream().filter(job->!isRemovedProvider(job)&&(source==null||job.getSource().equalsIgnoreCase(source))&&!inactive.contains(job.getId()))
                 .filter(job->!Set.of("CLOSED","EXPIRED","INVALID").contains(Objects.toString(job.getAvailabilityStatus(),"").toUpperCase(Locale.ROOT)))
-                .filter(job->isCurrentlyVerified(job,now)&&matching.fresh(job,freshness,now)).toList();
+                .filter(job->isRecommendationEligible(job,now)&&matching.fresh(job,freshness,now))
+                .filter(job->q==null||q.isBlank()||(job.getTitle()+" "+job.getCompany()+" "+job.getLocation()+" "+job.getWorkMode()+" "+job.getRequiredSkills()).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT)))
+                .filter(job->locationMatches(job,location)).toList();
         Map<String,Object> stats=new HashMap<>();stats.put("totalJobs",eligible.size());
-        stats.put("newIn24Hours",eligible.stream().filter(job->matching.fresh(job,"24h",now)).count());
-        stats.put("freshness",freshness);stats.put("verifiedJobs",eligible.size());
+        stats.put("newIn24Hours",eligible.stream()
+                .filter(job->job.getPublishedAt()!=null||job.getPostedAt()!=null)
+                .filter(job->matching.fresh(job,"24h",now)).count());
+        stats.put("freshness",freshness);
+        stats.put("verifiedJobs",eligible.stream().filter(job->isCurrentlyVerified(job,now)).count());
+        stats.put("emailAlertJobs",eligible.stream().filter(this::isEmailAlertJob).count());
         if(includeStrongMatches){CandidateProfile profile=getProfile();long strong=eligible.stream().filter(job->(int)matching.score(job,profile,now).get("score")>=Math.max(0,Math.min(100,minScore))).count();stats.put("strongMatches",strong);}
         return stats;
+    }
+    @GetMapping("/jobs/diagnostics") public Map<String,Object> jobDiagnostics(){
+        Instant now=Instant.now();
+        Instant verificationCutoff=now.minus(java.time.Duration.ofHours(verificationMaxAgeHours));
+        Instant discoveryCutoff=now.minus(java.time.Duration.ofDays(7));
+        List<JobListing> records=jobs.findAll();
+        CandidateProfile profile=profiles.findById(1L).orElseGet(CandidateProfile::new);
+        Map<String,Object> sourceStatus=source.status();
+        Map<String,Long> sourceCounts=records.stream().collect(Collectors.groupingBy(
+                job->Objects.toString(job.getSource(),"Unknown"),TreeMap::new,Collectors.counting()));
+        List<Map<String,Object>> jobsPerSource=sourceCounts.entrySet().stream().map(entry->
+                Map.<String,Object>of("source",entry.getKey(),"count",entry.getValue())).toList();
+        List<Map<String,Object>> configuredSources=new ArrayList<>();
+        Object sourceRows=sourceStatus.get("sources");
+        if(sourceRows instanceof List<?> rows){
+            for(Object value:rows){
+                if(value instanceof Map<?,?> sourceRow){
+                    Map<String,Object> row=new LinkedHashMap<>();
+                    sourceRow.forEach((key,item)->row.put(String.valueOf(key),item));
+                    configuredSources.add(row);
+                }
+            }
+        }
+        List<JobSourceConnection> manualSources=sourceRegistry.list();
+        for(JobSourceConnection manualSource:manualSources){
+            Map<String,Object> row=new LinkedHashMap<>();
+            row.put("source",manualSource.getName());
+            row.put("enabled",manualSource.isEnabled());
+            row.put("configured",true);
+            row.put("mode","Manual source");
+            row.put("connectionStatus",manualSource.getConnectionStatus());
+            row.put("jobCount",sourceCounts.getOrDefault(manualSource.getName(),0L));
+            configuredSources.add(row);
+        }
+        Set<String> configuredNames=configuredSources.stream()
+                .map(row->Objects.toString(row.get("source"),"")).collect(Collectors.toSet());
+        for(Map<String,Object> sourceCount:jobsPerSource){
+            String name=Objects.toString(sourceCount.get("source"),"Unknown");
+            if(!configuredNames.contains(name)){
+                configuredSources.add(Map.of("source",name,"enabled",false,"configured",false,
+                        "mode","Stored jobs only","jobCount",sourceCount.get("count")));
+            }
+        }
+        long configuredManualSources=manualSources.size();
+        long configuredProviderSources=configuredSources.stream()
+                .filter(row->!"Manual source".equals(row.get("mode"))&&Boolean.TRUE.equals(row.get("configured"))).count();
+        long retiredJobs=records.stream().filter(this::isRemovedProvider).count();
+        return Map.ofEntries(
+                Map.entry("totalJobs",records.size()),
+                Map.entry("jobsPerSource",jobsPerSource),
+                Map.entry("jobsFailingVerificationWindow",records.stream().filter(job->job.getLastVerifiedAt()==null||job.getLastVerifiedAt().isBefore(verificationCutoff)).count()),
+                Map.entry("jobsOutsideDiscoveryWindow",records.stream().filter(job->job.getFirstSeenAt()==null||job.getFirstSeenAt().isBefore(discoveryCutoff)).count()),
+                Map.entry("jobsWithMatchScoreZero",records.stream().filter(job->((Number)matching.score(job,profile,now).get("score")).intValue()==0).count()),
+                Map.entry("jobsExcludedRetiredSource",retiredJobs),
+                Map.entry("jobsWithoutVerificationTimestamp",records.stream().filter(job->job.getLastVerifiedAt()==null).count()),
+                Map.entry("sources",configuredSources),
+                Map.entry("publicFeedsEnabled",sourceStatus.get("publicFeedsEnabled")),
+                Map.entry("greenhouseBoardsConfigured",sourceStatus.get("greenhouseBoardsConfigured")),
+                Map.entry("leverBoardsConfigured",sourceStatus.get("leverBoardsConfigured")),
+                Map.entry("ashbyBoardsConfigured",sourceStatus.get("ashbyBoardsConfigured")),
+                Map.entry("workableAccountsConfigured",sourceStatus.get("workableAccountsConfigured")),
+                Map.entry("smartRecruitersCompaniesConfigured",sourceStatus.get("smartRecruitersCompaniesConfigured")),
+                Map.entry("dashboardFreshnessDefault","24h"),
+                Map.entry("verificationWindowHours",verificationMaxAgeHours),
+                Map.entry("configuredSourceCount",configuredProviderSources+configuredManualSources),
+                Map.entry("sourcesConfigured",configuredProviderSources+configuredManualSources>0));
     }
     @GetMapping("/jobs/{id}") public JobListing getJob(@PathVariable Long id){JobListing j=jobs.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found"));j.setDescription(cleanDescription(j.getDescription()));return j;}
     @PostMapping("/jobs") @ResponseStatus(HttpStatus.CREATED) public JobListing addJob(@RequestBody JobListing input) {
@@ -192,7 +274,133 @@ public class ApiController {
         if(input.getApplyUrl().isBlank()) input.setApplyUrl(input.getUrl());
         if(input.getAttributionUrl().isBlank()) input.setAttributionUrl(input.getUrl());
         input.setSource(input.getSource().isBlank()?"External Link":input.getSource()); input.setRetrievedAt(LocalDateTime.now());input.setImportMethod("MANUAL");input.setAvailabilityStatus("UNVERIFIED");
+        input.setApplicationUrlVerified(!input.getApplyUrl().isBlank()&&!input.getApplyUrl().equals(input.getUrl()));
         return jobs.save(input);
+    }
+    @PostMapping("/jobs/save-current-page") public JobListing saveCurrentJobPage(@RequestBody JobListing input) {
+        input.setUrl(canonicalHttpsUrl(input.getUrl(),"Job URL"));
+        String sourceName=sourceForJobUrl(input.getUrl());
+        input.setSource(sourceName);
+        if(!input.getApplyUrl().isBlank())input.setApplyUrl(canonicalHttpsUrl(input.getApplyUrl(),"Application URL"));
+        if(!input.getAttributionUrl().isBlank())input.setAttributionUrl(canonicalHttpsUrl(input.getAttributionUrl(),"Source URL"));
+        if(input.getAttributionUrl().isBlank())input.setAttributionUrl(input.getUrl());
+        if(input.getTitle().isBlank())throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"A job title is required to save the current page.");
+        if(input.getDescription().length()>4000)input.setDescription(input.getDescription().substring(0,4000));
+        if(input.getRequiredSkills().length()>1000)input.setRequiredSkills(input.getRequiredSkills().substring(0,1000));
+
+        java.time.Instant observedAt=java.time.Instant.now();
+        LocalDateTime observedLocal=LocalDateTime.now();
+        JobListing job=jobs.findByUrl(input.getUrl()).orElseGet(JobListing::new);
+        boolean isNew=job.getId()==null;
+        if(!input.getSourceJobId().isBlank())job.setSourceJobId(input.getSourceJobId().substring(0,Math.min(120,input.getSourceJobId().length())));
+        if(!input.getTitle().isBlank())job.setTitle(input.getTitle());
+        if(!input.getCompany().isBlank())job.setCompany(input.getCompany());
+        if(!input.getLocation().isBlank())job.setLocation(input.getLocation());
+        if(!input.getDescription().isBlank())job.setDescription(input.getDescription());
+        if(!input.getRequiredSkills().isBlank())job.setRequiredSkills(input.getRequiredSkills());
+        if(!input.getExperienceRequirements().isBlank())job.setExperienceRequirements(input.getExperienceRequirements());
+        if(!input.getExperienceLevel().isBlank())job.setExperienceLevel(input.getExperienceLevel());
+        if(!input.getWorkMode().isBlank())job.setWorkMode(input.getWorkMode());
+        if(!input.getEmploymentType().isBlank())job.setEmploymentType(input.getEmploymentType());
+        if(!input.getSalary().isBlank())job.setSalary(input.getSalary());
+        if(input.getPublishedAt()!=null)job.setPublishedAt(input.getPublishedAt());
+        job.setUrl(input.getUrl());job.setSource(sourceName);job.setAttributionUrl(input.getAttributionUrl());
+        if(!job.isApplicationUrlVerified()){job.setApplyUrl("");}
+        job.setRetrievedAt(observedLocal);job.setLastUpdatedAt(observedLocal);job.setLastSeenAt(observedAt);
+        job.setLastVerifiedAt(observedAt);job.setAvailabilityStatus("OPEN");job.setClosedAt(null);job.setImportMethod("BROWSER_PAGE");
+        if(isNew)job.setFirstSeenAt(observedAt);
+        return jobs.save(job);
+    }
+    @PostMapping("/jobs/import/naukri-visible") @Transactional
+    public Map<String,Object> importVisibleNaukriJobs(@RequestBody List<JobListing> input){
+        if(input==null||input.isEmpty())throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"No visible Naukri job cards were provided.");
+        if(input.size()>50)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Import at most 50 visible Naukri job cards at a time.");
+        JobSourceSyncState syncState=jobSourceSyncStates.findById("Naukri").orElseGet(()->new JobSourceSyncState("Naukri"));
+        syncState.setLastAttemptAt(Instant.now());
+        jobSourceSyncStates.save(syncState);
+        int imported=0,updated=0,rejected=0;
+        List<String> diagnostics=new ArrayList<>();
+        List<JobListing> upserted=new ArrayList<>();
+        for(int index=0;index<input.size();index++){
+            JobListing incoming=input.get(index);
+            try{
+                if(incoming==null)throw new IllegalArgumentException("The listing is empty.");
+                String listingUrl=canonicalNaukriListingUrl(incoming.getUrl());
+                if(incoming.getTitle().isBlank())throw new IllegalArgumentException("A title is required.");
+                if(incoming.getTitle().length()>200||incoming.getCompany().length()>200
+                        ||incoming.getLocation().length()>250||incoming.getDescription().length()>2000
+                        ||incoming.getSalary().length()>120||incoming.getRequiredSkills().length()>1000
+                        ||incoming.getExperienceRequirements().length()>250)
+                    throw new IllegalArgumentException("A listing field exceeded its permitted length.");
+                String sourceJobId=incoming.getSourceJobId().trim();
+                if(sourceJobId.length()>120||!sourceJobId.isEmpty()&&!sourceJobId.matches("[A-Za-z0-9_-]+"))
+                    throw new IllegalArgumentException("The Naukri job identifier is invalid.");
+                String urlJobId=java.net.URI.create(listingUrl).getPath().matches("(?i).*job-listings.*-(\\d+)/?")
+                        ?java.net.URI.create(listingUrl).getPath().replaceFirst("(?i).*job-listings.*-(\\d+)/?","$1"):"";
+                if(sourceJobId.isBlank())sourceJobId=urlJobId;
+                else if(!urlJobId.isBlank()&&!sourceJobId.equals(urlJobId))
+                    throw new IllegalArgumentException("The supplied job identifier does not match the listing URL.");
+
+                Optional<JobListing> byUrl=jobs.findByUrl(listingUrl);
+                Optional<JobListing> byId=sourceJobId.isBlank()?Optional.empty()
+                        :jobs.findFirstBySourceIgnoreCaseAndSourceJobIdIgnoreCase("Naukri",sourceJobId);
+                if(byUrl.isPresent()&&byId.isPresent()&&!byUrl.get().getId().equals(byId.get().getId()))
+                    throw new IllegalArgumentException("The listing URL and job identifier refer to different saved jobs.");
+                JobListing job=byId.orElseGet(()->byUrl.orElseGet(JobListing::new));
+                boolean isNew=job.getId()==null;
+                if(!isNew&&!job.getUrl().equals(listingUrl)){
+                    Optional<JobListing> urlOwner=byUrl.filter(existing->!existing.getId().equals(job.getId()));
+                    if(urlOwner.isPresent())throw new IllegalArgumentException("The canonical listing URL already belongs to another job.");
+                }
+                job.setUrl(listingUrl);
+                job.setSource("Naukri");
+                if(!sourceJobId.isBlank())job.setSourceJobId(sourceJobId);
+                if(!incoming.getTitle().isBlank())job.setTitle(incoming.getTitle());
+                if(!incoming.getCompany().isBlank())job.setCompany(incoming.getCompany());
+                if(!incoming.getLocation().isBlank())job.setLocation(incoming.getLocation());
+                if(!incoming.getWorkMode().isBlank())job.setWorkMode(incoming.getWorkMode());
+                if(!incoming.getDescription().isBlank())job.setDescription(incoming.getDescription());
+                if(!incoming.getSalary().isBlank())job.setSalary(incoming.getSalary());
+                if(!incoming.getRequiredSkills().isBlank())job.setRequiredSkills(incoming.getRequiredSkills());
+                if(!incoming.getExperienceRequirements().isBlank())job.setExperienceRequirements(incoming.getExperienceRequirements());
+                if(!incoming.getExperienceLevel().isBlank())job.setExperienceLevel(incoming.getExperienceLevel());
+                if(!incoming.getEmploymentType().isBlank())job.setEmploymentType(incoming.getEmploymentType());
+                if(incoming.getPublishedAt()!=null)job.setPublishedAt(incoming.getPublishedAt());
+                job.setAttributionUrl(listingUrl);
+                if(!job.isApplicationUrlVerified())job.setApplyUrl("");
+                Instant observedAt=Instant.now();
+                LocalDateTime observedLocal=LocalDateTime.now();
+                job.setRetrievedAt(isNew?observedLocal:job.getRetrievedAt());
+                job.setFirstSeenAt(isNew?observedAt:job.getFirstSeenAt());
+                job.setLastSeenAt(observedAt);job.setLastVerifiedAt(observedAt);job.setLastSuccessfulSyncAt(observedAt);
+                job.setLastUpdatedAt(observedLocal);job.setAvailabilityStatus("OPEN");job.setClosedAt(null);
+                job.setImportMethod("BROWSER_SEARCH_RESULTS");
+                upserted.add(jobs.save(job));
+                if(isNew)imported++;else updated++;
+            }catch(IllegalArgumentException|ResponseStatusException error){
+                rejected++;
+                diagnostics.add("Card "+(index+1)+": "+Objects.toString(error.getMessage(),"invalid listing"));
+            }
+        }
+        List<JobListing> distinctJobs=upserted.stream().collect(Collectors.toMap(JobListing::getId,job->job,(first,last)->last,LinkedHashMap::new)).values().stream().toList();
+        syncState.setLastSuccessfulSyncAt(Instant.now());syncState.setFetched(input.size());
+        syncState.setImported(imported);syncState.setUpdated(updated);syncState.setRejected(rejected);
+        syncState.setDeduplicated(updated);
+        syncState.setLatestError(String.join("; ",diagnostics).substring(0,Math.min(1900,String.join("; ",diagnostics).length())));
+        jobSourceSyncStates.save(syncState);
+        return Map.of("source","Naukri","attempted",input.size(),"imported",imported,"updated",updated,
+                "rejected",rejected,"jobs",distinctJobs,"diagnostics",diagnostics,
+                "checkedAt",Instant.now().toString(),"lastSuccessfulSyncAt",syncState.getLastSuccessfulSyncAt());
+    }
+    @PutMapping("/jobs/{id}/application-url")
+    public JobListing verifyApplicationUrl(@PathVariable Long id,@RequestBody Map<String,Object> body){
+        JobListing job=jobs.findById(id).orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Job not found."));
+        String applicationUrl=canonicalHttpsUrl(Objects.toString(body.get("url"),""),"Application URL");
+        if(sameUrlPath(applicationUrl,job.getUrl()))
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"The original listing URL is not a separately verified application destination.");
+        job.setApplyUrl(applicationUrl);job.setApplicationUrlVerified(true);
+        job.setLastUpdatedAt(LocalDateTime.now());
+        return jobs.save(job);
     }
     @PostMapping("/jobs/reconcile") public Map<String,Object> reconcileJobLifecycle(){
         java.time.Instant cutoff=java.time.Instant.now().minus(java.time.Duration.ofHours(verificationMaxAgeHours));
@@ -225,7 +433,45 @@ public class ApiController {
         } catch(Exception e) { throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Remote job sync failed: "+e.getMessage(),e); }
     }
     @PostMapping("/jobs/sync/{sourceName}") public Map<String,Object> syncOne(@PathVariable String sourceName){return source.syncSource(sourceName);}
+    @PostMapping("/jobs/sync/automatic") public Map<String,Object> syncOnApplicationOpen(){return dailySync.runOnApplicationOpen();}
+    @GetMapping("/settings/automatic-sync") public DailySyncSettings automaticSyncSettings(){return dailySync.settings();}
+    @PutMapping("/settings/automatic-sync") public DailySyncSettings saveAutomaticSyncSettings(@RequestBody Map<String,Object> body){
+        try{return dailySync.update(body);}catch(IllegalArgumentException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,error.getMessage(),error);}
+    }
     @GetMapping("/sources") public Map<String,Object> sources(){return source.status();}
+    @GetMapping("/settings/adzuna-search-profiles") public List<AdzunaSearchProfile> adzunaSearchProfiles(){return adzunaSearchProfiles.list();}
+    @PutMapping("/settings/adzuna-search-profiles")
+    public List<AdzunaSearchProfile> saveAdzunaSearchProfiles(@RequestBody Map<String,Object> body){
+        Object raw=body.get("profiles");
+        if(!(raw instanceof List<?> input))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Profiles must be a list.");
+        List<Map<String,Object>> rows=new ArrayList<>();
+        for(Object item:input){
+            if(!(item instanceof Map<?,?> map))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Each profile must be an object.");
+            Map<String,Object> row=new LinkedHashMap<>();
+            map.forEach((key,value)->row.put(String.valueOf(key),value));
+            rows.add(row);
+        }
+        try{return adzunaSearchProfiles.replace(rows);}
+        catch(IllegalArgumentException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,error.getMessage());}
+    }
+    @GetMapping("/settings/email-alerts") public Map<String,Object> emailAlertSettings(){return emailAlertSettings.publicSettings();}
+    @PutMapping("/settings/email-alerts")
+    public Map<String,Object> saveEmailAlertSettings(@RequestBody Map<String,Object> body){
+        try{emailAlertSettings.update(body);return emailAlertSettings.publicSettings();}
+        catch(IllegalArgumentException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,error.getMessage());}
+    }
+    @PostMapping("/settings/email-alerts/test") public Map<String,Object> testEmailAlertConnection(){return emailAlertImporter.testConnection();}
+    @GetMapping("/settings/career-pages") public List<Map<String,Object>> careerPageSettings(){return careerPages.list();}
+    @PostMapping("/settings/career-pages") @ResponseStatus(HttpStatus.CREATED)
+    public Map<String,Object> addCareerPage(@RequestBody Map<String,Object> body){
+        try{return careerPages.add(Objects.toString(body.get("url"),""));}
+        catch(IllegalArgumentException error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,error.getMessage());}
+    }
+    @DeleteMapping("/settings/career-pages/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteCareerPage(@PathVariable long id){
+        try{careerPages.remove(id);}
+        catch(IllegalArgumentException error){throw new ResponseStatusException(HttpStatus.NOT_FOUND,error.getMessage());}
+    }
     @GetMapping("/portal-capabilities") public List<Map<String,Object>> portalCapabilities(){return portalCapabilities.list(source.status());}
     @GetMapping("/autofill/capabilities") public List<Map<String,Object>> autofillCapabilities(){
         List<Map<String,Object>> capabilities=new ArrayList<>();
@@ -290,6 +536,24 @@ public class ApiController {
     @PutMapping("/sources/manual/{id}") public JobSourceConnection updateManualSource(@PathVariable Long id,@RequestBody Map<String,Object> body){try{return sourceRegistry.update(id,body);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}}
     @DeleteMapping("/sources/manual/{id}") @ResponseStatus(HttpStatus.NO_CONTENT) public void deleteManualSource(@PathVariable Long id){try{sourceRegistry.delete(id);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}}
     @PostMapping("/sources/manual/{id}/test") public Map<String,Object> testManualSource(@PathVariable Long id){try{return sourceRegistry.test(id);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}catch(IllegalArgumentException e){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,e.getMessage());}}
+    @GetMapping("/sources/company-boards") public List<CompanyBoardConfiguration> companyBoards(){return companyBoardService.list();}
+    @PostMapping("/sources/company-boards") @ResponseStatus(HttpStatus.CREATED)
+    public CompanyBoardConfiguration addCompanyBoard(@RequestBody Map<String,Object> body){
+        try{return companyBoardService.add(body);}catch(IllegalArgumentException e){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,e.getMessage());}
+    }
+    @PutMapping("/sources/company-boards/{id}")
+    public CompanyBoardConfiguration updateCompanyBoard(@PathVariable Long id,@RequestBody Map<String,Object> body){
+        try{return companyBoardService.update(id,body);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}
+        catch(IllegalArgumentException e){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,e.getMessage());}
+    }
+    @DeleteMapping("/sources/company-boards/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteCompanyBoard(@PathVariable Long id){
+        try{companyBoardService.delete(id);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}
+    }
+    @PostMapping("/sources/company-boards/{id}/test")
+    public Map<String,Object> testCompanyBoard(@PathVariable Long id){
+        try{return companyBoardService.test(id);}catch(NoSuchElementException e){throw new ResponseStatusException(HttpStatus.NOT_FOUND,e.getMessage());}
+    }
     @GetMapping("/search-links") public List<Map<String,String>> searchLinks(@RequestParam(defaultValue="software developer") String role,@RequestParam(defaultValue="India") String location){
         String keywords=java.net.URLEncoder.encode(role,java.nio.charset.StandardCharsets.UTF_8).replace("+","%20");
         String place=java.net.URLEncoder.encode(location,java.nio.charset.StandardCharsets.UTF_8).replace("+","%20");
@@ -545,16 +809,47 @@ public class ApiController {
             return canonical.toASCIIString();
         }catch(Exception error){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,label+" must be a valid public HTTPS URL.");}
     }
+    private String canonicalNaukriListingUrl(String raw){
+        String canonical=canonicalHttpsUrl(raw,"Naukri listing URL");
+        try{
+            java.net.URI uri=java.net.URI.create(canonical);
+            String host=Objects.toString(uri.getHost(),"").toLowerCase(Locale.ROOT);
+            String path=Objects.toString(uri.getPath(),"").toLowerCase(Locale.ROOT);
+            if(!(host.equals("naukri.com")||host.endsWith(".naukri.com"))
+                    ||!path.contains("job-listings"))
+                throw new IllegalArgumentException();
+            return new java.net.URI("https",null,host,-1,uri.getPath(),null,null).toASCIIString();
+        }catch(Exception error){
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Only individual Naukri job listing URLs can be imported.");
+        }
+    }
+    private boolean sameUrlPath(String left,String right){
+        try{
+            java.net.URI a=java.net.URI.create(left),b=java.net.URI.create(right);
+            return Objects.equals(a.getScheme(),b.getScheme())&&Objects.equals(a.getHost(),b.getHost())
+                    &&Objects.equals(a.getPath(),b.getPath());
+        }catch(Exception error){return false;}
+    }
     private String hostFromUrl(String raw){
         try{return java.net.URI.create(raw).getHost();}catch(Exception error){return "Company not specified";}
     }
+    private String sourceForJobUrl(String raw){
+        String host=Objects.toString(hostFromUrl(raw),"").toLowerCase(Locale.ROOT);
+        if(host.equals("naukri.com")||host.endsWith(".naukri.com"))return "Naukri";
+        if(host.equals("linkedin.com")||host.endsWith(".linkedin.com"))return "LinkedIn";
+        if(host.equals("google.com")||host.endsWith(".google.com"))return "Google Jobs";
+        if(host.equals("indeed.com")||host.endsWith(".indeed.com"))return "Indeed";
+        if(host.equals("glassdoor.com")||host.endsWith(".glassdoor.com"))return "Glassdoor";
+        return "External Link";
+    }
     private boolean locationMatches(JobListing job,String query){
         if(query==null||query.isBlank()) return true;
-        String candidate=Objects.toString(job.getLocation(),"").toLowerCase(Locale.ROOT);
+        String candidate=(Objects.toString(job.getLocation(),"")+" "+Objects.toString(job.getWorkMode(),"")).toLowerCase(Locale.ROOT);
         return Arrays.stream(query.split(",")).map(String::trim).filter(term->!term.isBlank())
                 .anyMatch(term->candidate.contains(term.toLowerCase(Locale.ROOT)));
     }
-    private boolean isRemovedProvider(JobListing job){return Set.of("remoteok","remote ok").contains(Objects.toString(job.getSource(),"").trim().toLowerCase(Locale.ROOT));}
+    private boolean isRemovedProvider(JobListing job){return retiredJobSources().contains(Objects.toString(job.getSource(),"").trim().toLowerCase(Locale.ROOT));}
+    private Set<String> retiredJobSources(){return Arrays.stream(Objects.toString(retiredJobSources,"").split("[,;\\s]+")).map(value->value.trim().toLowerCase(Locale.ROOT)).filter(value->!value.isBlank()).collect(Collectors.toUnmodifiableSet());}
     private boolean sameSkill(String left,String right){return canonicalSkill(left).equals(canonicalSkill(right));}
     private String canonicalSkill(String value){String s=value.toLowerCase(Locale.ROOT).trim();return switch(s){case "js"->"javascript";case "node"->"node.js";case "postgres"->"postgresql";case "restful api","restful apis"->"rest api";case "reactjs"->"react";default->s;};}
     private Set<String> split(String s){if(s==null||s.isBlank())return Set.of();return Arrays.stream(s.toLowerCase().split("[,;|\\n]")).map(String::trim).filter(x->!x.isBlank()).collect(Collectors.toCollection(LinkedHashSet::new));}
@@ -562,11 +857,26 @@ public class ApiController {
         return "OPEN".equalsIgnoreCase(job.getAvailabilityStatus())&&job.getLastVerifiedAt()!=null
                 &&!job.getLastVerifiedAt().isBefore(now.minus(java.time.Duration.ofHours(verificationMaxAgeHours)));
     }
+    private boolean isEmailAlertJob(JobListing job){
+        return Objects.toString(job.getSource(),"").toLowerCase(Locale.ROOT).matches("(naukri|linkedin|indeed|glassdoor) alert");
+    }
+    private boolean isRecommendationEligible(JobListing job,Instant now){
+        if(isCurrentlyVerified(job,now))return true;
+        if("MANUAL".equalsIgnoreCase(job.getImportMethod())&&"UNVERIFIED".equalsIgnoreCase(job.getAvailabilityStatus())
+                &&job.getFirstSeenAt()!=null&&!job.getFirstSeenAt().isBefore(now.minus(java.time.Duration.ofDays(7)))
+                &&!job.getFirstSeenAt().isAfter(now))return true;
+        return isEmailAlertJob(job)&&"UNVERIFIED".equalsIgnoreCase(job.getAvailabilityStatus())
+                &&job.getFirstSeenAt()!=null&&!job.getFirstSeenAt().isBefore(now.minus(java.time.Duration.ofDays(7)))
+                &&!job.getFirstSeenAt().isAfter(now);
+    }
     private String canonicalForReconciliation(String raw){
         try{return canonicalHttpsUrl(raw,"Job URL");}catch(ResponseStatusException invalid){return "";}
     }
     private Map<String,Object> jobMap(JobListing j) {
-        Map<String,Object> m=new LinkedHashMap<>();m.put("id",j.getId());m.put("title",j.getTitle());m.put("company",j.getCompany());m.put("location",j.getLocation());m.put("url",j.getUrl());m.put("applyUrl",j.getApplyUrl());m.put("source",j.getSource());m.put("providerBadge",Set.of("Remotive","Arbeitnow","Jobicy","Greenhouse","Lever").contains(j.getSource())?"Direct API":"External Link");m.put("employmentType",j.getEmploymentType());m.put("experienceLevel",j.getExperienceLevel());m.put("experienceRequirements",j.getExperienceRequirements());m.put("workMode",j.getWorkMode());m.put("salary",j.getSalary());m.put("description",cleanDescription(j.getDescription()));m.put("requiredSkills",j.getRequiredSkills());m.put("publishedAt",j.getPublishedAt());m.put("postedAt",j.getPostedAt());m.put("exactPostingTime",j.isExactPostingTime());m.put("attributionUrl",j.getAttributionUrl());m.put("retrievedAt",j.getRetrievedAt());m.put("firstSeenAt",j.getFirstSeenAt());m.put("lastSeenAt",j.getLastSeenAt());m.put("lastVerifiedAt",j.getLastVerifiedAt());m.put("lastSuccessfulSyncAt",j.getLastSuccessfulSyncAt());m.put("availabilityStatus",j.getAvailabilityStatus());m.put("importMethod",j.getImportMethod());return m;
+        boolean emailAlert=isEmailAlertJob(j);
+        boolean applyUrlVerified=!emailAlert&&(j.isApplicationUrlVerified()
+                ||(!"Naukri".equalsIgnoreCase(j.getSource())&&!j.getApplyUrl().isBlank()&&!j.getApplyUrl().equals(j.getUrl())));
+        Map<String,Object> m=new LinkedHashMap<>();m.put("id",j.getId());m.put("title",j.getTitle());m.put("company",j.getCompany());m.put("location",j.getLocation());m.put("url",j.getUrl());m.put("canonicalListingUrl",j.getUrl());m.put("applyUrl",j.getApplyUrl());m.put("applicationUrlVerified",applyUrlVerified);m.put("source",j.getSource());m.put("sourceJobId",j.getSourceJobId());m.put("providerBadge",emailAlert?"Email alert":Set.of("Remotive","Arbeitnow","Jobicy","Greenhouse","Lever","Ashby","Workable","SmartRecruiters","Adzuna").contains(j.getSource())?"Direct API":"External Link");m.put("descriptionStatus",j.getDescriptionStatus());m.put("employmentType",j.getEmploymentType());m.put("experienceLevel",j.getExperienceLevel());m.put("experienceRequirements",j.getExperienceRequirements());m.put("workMode",j.getWorkMode());m.put("salary",j.getSalary());m.put("description",cleanDescription(j.getDescription()));m.put("requiredSkills",j.getRequiredSkills());m.put("publishedAt",j.getPublishedAt());m.put("postedAt",j.getPostedAt());m.put("validThrough",j.getValidThrough());m.put("exactPostingTime",j.isExactPostingTime());m.put("attributionUrl",j.getAttributionUrl());m.put("retrievedAt",j.getRetrievedAt());m.put("firstSeenAt",j.getFirstSeenAt());m.put("lastSeenAt",j.getLastSeenAt());m.put("lastVerifiedAt",j.getLastVerifiedAt());m.put("lastSuccessfulSyncAt",j.getLastSuccessfulSyncAt());m.put("availabilityStatus",j.getAvailabilityStatus());m.put("importMethod",j.getImportMethod());return m;
     }
     private String cleanDescription(String raw){if(raw==null)return "";return raw.replace("\u00c2\u00a0"," ").replaceAll("(?is)please mention the word.{0,500}?(?:read the job post completely|show you read).{0,120}?(?:\\.|$)"," ").replaceAll("(?i)\\btag\\s+[A-Za-z0-9+/=]{12,}"," ").replaceAll("(?i)#[A-Za-z0-9+/=]{12,}"," ").replaceAll("(?is)this is a beta feature to avoid spam applicants\\.?"," ").replaceAll("\\s+"," ").trim();}
 }

@@ -14,7 +14,7 @@ public class SourceRegistryService {
   public SourceRegistryService(JobSourceConnectionRepository repository) {
     this.repository=repository;
   }
-  public List<JobSourceConnection> list(){return repository.findAll().stream().sorted(Comparator.comparing(JobSourceConnection::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))).toList();}
+  public List<JobSourceConnection> list(){return repository.findAll().stream().filter(source->!"CAREER_PAGE_JSONLD".equalsIgnoreCase(source.getSourceType())).sorted(Comparator.comparing(JobSourceConnection::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))).toList();}
   public JobSourceConnection add(Map<String,Object> body) {
     String raw=Objects.toString(body.get("url"),"").trim(); String name=Objects.toString(body.get("name"),"").trim();
     validatePublicHttps(raw);
@@ -71,13 +71,31 @@ public class SourceRegistryService {
   private static String detectByUrl(String url){String u=url.toLowerCase(Locale.ROOT);if(u.endsWith(".json")||u.contains("/api/")||u.contains("?format=json"))return "POSSIBLE_JSON_API";if(u.contains("rss")||u.contains("atom")||u.endsWith(".xml"))return "POSSIBLE_RSS_ATOM";return "UNKNOWN";}
   private static String hostName(String raw){try{return URI.create(raw).getHost();}catch(Exception e){return "Manual source";}}
   private static String safeError(Exception e){String m=Objects.toString(e.getMessage(),e.getClass().getSimpleName());return m.length()>500?m.substring(0,500):m;}
-  private static void validatePublicHttps(String raw){
+  static void validatePublicHttps(String raw){
     if(raw==null||raw.length()>2048)throw new IllegalArgumentException("Enter a valid HTTPS URL (maximum 2048 characters).");
     URI uri;try{uri=URI.create(raw);}catch(Exception e){throw new IllegalArgumentException("URL format is invalid.");}
     if(!"https".equalsIgnoreCase(uri.getScheme())||uri.getHost()==null||uri.getUserInfo()!=null)throw new IllegalArgumentException("Only public HTTPS URLs are supported. Credentials in URLs are not allowed.");
     String host=uri.getHost().toLowerCase(Locale.ROOT);
     if(host.equals("localhost")||host.endsWith(".localhost")||host.endsWith(".local")||host.endsWith(".internal")||host.equals("metadata.google.internal"))throw new IllegalArgumentException("Local and internal hostnames are blocked for security.");
-    try { for(InetAddress address:InetAddress.getAllByName(host)) if(address.isAnyLocalAddress()||address.isLoopbackAddress()||address.isLinkLocalAddress()||address.isSiteLocalAddress()||address.isMulticastAddress()) throw new IllegalArgumentException("Private or local network addresses are blocked."); }
+    try { for(InetAddress address:InetAddress.getAllByName(host)) if(nonPublicAddress(address)) throw new IllegalArgumentException("Private, local, or reserved network addresses are blocked."); }
     catch(UnknownHostException e){throw new IllegalArgumentException("The host could not be resolved. Check the URL and try again.");}
+  }
+  private static boolean nonPublicAddress(InetAddress address) throws UnknownHostException {
+    if(address.isAnyLocalAddress()||address.isLoopbackAddress()||address.isLinkLocalAddress()||address.isSiteLocalAddress()||address.isMulticastAddress())return true;
+    byte[] bytes=address.getAddress();
+    if(bytes.length==4){
+      int first=Byte.toUnsignedInt(bytes[0]),second=Byte.toUnsignedInt(bytes[1]),third=Byte.toUnsignedInt(bytes[2]);
+      return first==0||first==100&&second>=64&&second<=127||first==192&&(second==0&&(third==0||third==2)||second==168)
+          ||first==198&&(second==18||second==19||second==51&&third==100)||first==203&&second==0&&third==113||first>=224;
+    }
+    if(bytes.length==16){
+      if((bytes[0]&0xfe)==0xfc||Byte.toUnsignedInt(bytes[0])==0x20&&Byte.toUnsignedInt(bytes[1])==0x01
+          &&Byte.toUnsignedInt(bytes[2])==0x0d&&Byte.toUnsignedInt(bytes[3])==0xb8)return true;
+      boolean mapped=true;
+      for(int index=0;index<10;index++)mapped&=bytes[index]==0;
+      mapped&=bytes[10]==(byte)0xff&&bytes[11]==(byte)0xff;
+      if(mapped)return nonPublicAddress(InetAddress.getByAddress(java.util.Arrays.copyOfRange(bytes,12,16)));
+    }
+    return false;
   }
 }

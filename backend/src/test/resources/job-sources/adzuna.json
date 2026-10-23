@@ -1,0 +1,30 @@
+{
+  "count": 1,
+  "results": [
+    {
+      "id": "adzuna-401",
+      "title": "Full Stack Developer",
+      "company": {
+        "display_name": "Sample Adzuna India"
+      },
+      "location": {
+        "display_name": "Jaipur, Rajasthan",
+        "area": [
+          { "level": 0, "tag": "India" },
+          { "level": 1, "tag": "Rajasthan" },
+          { "level": 3, "tag": "Jaipur" }
+        ]
+      },
+      "description": "<p>Build web applications with React &amp; Java.</p>",
+      "redirect_url": "https://www.adzuna.in/land/ad/401?utm_source=api&token=sample",
+      "created": "2026-10-22T09:30:00Z",
+      "contract_time": "full_time",
+      "contract_type": "permanent",
+      "salary_min": 600000,
+      "salary_max": 900000,
+      "category": {
+        "label": "IT Jobs"
+      }
+    }
+  ]
+}

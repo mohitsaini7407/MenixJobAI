@@ -23,4 +23,32 @@ class JobMatchingServiceTest {
         assertFalse(service.fresh(unknown,"older",now));
         assertFalse(service.fresh(unknown,"7d",now));
     }
+    @Test void manuallySavedJobsUseDiscoveryTimeForDashboardFreshness(){
+        Instant now=Instant.parse("2026-10-22T12:00:00Z");
+        JobListing job=new JobListing();job.setImportMethod("MANUAL");job.setFirstSeenAt(now.minus(Duration.ofHours(8)));
+        assertTrue(service.fresh(job,"24h",now));
+        assertTrue(service.fresh(job,"7d",now));
+        assertFalse(service.fresh(job,"older",now));
+        job.setFirstSeenAt(now.minus(Duration.ofDays(8)));
+        assertFalse(service.fresh(job,"7d",now));
+        assertTrue(service.fresh(job,"older",now));
+    }
+    @Test void pageObservationUsesVerificationTimeWithoutClaimingPostingFreshness(){
+        Instant now=Instant.parse("2026-10-22T12:00:00Z");
+        JobListing observed=new JobListing();observed.setImportMethod("BROWSER_PAGE");observed.setLastVerifiedAt(now.minus(Duration.ofHours(4)));
+        assertTrue(service.fresh(observed,"24h",now));
+        assertTrue(service.fresh(observed,"7d",now));
+        assertFalse(service.fresh(observed,"older",now));
+        observed.setLastVerifiedAt(now.minus(Duration.ofDays(8)));
+        assertFalse(service.fresh(observed,"7d",now));
+    }
+    @Test void visibleSearchResultFreshnessUsesObservationTimeWithoutClaimingPostingDate(){
+        Instant now=Instant.parse("2026-10-22T12:00:00Z");
+        JobListing imported=new JobListing();imported.setImportMethod("BROWSER_SEARCH_RESULTS");imported.setLastVerifiedAt(now.minus(Duration.ofHours(2)));
+        assertTrue(service.fresh(imported,"24h",now));
+        assertTrue(service.fresh(imported,"7d",now));
+        assertFalse(service.fresh(imported,"older",now));
+        imported.setLastVerifiedAt(now.minus(Duration.ofDays(8)));
+        assertFalse(service.fresh(imported,"7d",now));
+    }
 }
